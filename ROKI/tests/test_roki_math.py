@@ -2,6 +2,7 @@ import csv
 import io
 import math
 import unittest
+from ROKI.monitor.roki_monitor import frd_to_neu, project_neu
 
 G = 9.80665
 
@@ -48,6 +49,33 @@ class BaroGate:
         self.prev=self.height=raw; self.count=0; return True
 
 class RokiMathTests(unittest.TestCase):
+    def test_scene_yaw_north_east_west(self):
+        # Top view: north is up, east is right. +Yaw is a clockwise turn.
+        top_azimuth=0.; top_elevation=math.pi/2; nose=(1.,0.,0.)
+        north=frd_to_neu(nose,0,0,0); east=frd_to_neu(nose,0,0,math.pi/2); west=frd_to_neu(nose,0,0,-math.pi/2)
+        self.assertGreater(north[0],.999)
+        self.assertGreater(project_neu(north,top_azimuth,top_elevation)[1],0)
+        self.assertGreater(east[1],.999)
+        self.assertGreater(project_neu(east,top_azimuth,top_elevation)[0],0)
+        self.assertLess(west[1],-.999)
+        self.assertLess(project_neu(west,top_azimuth,top_elevation)[0],0)
+
+    def test_scene_yaw_remains_correct_with_roll_pitch(self):
+        # Roll/pitch tilt the nose vertically but must not mirror its heading.
+        nose_east=frd_to_neu((1.,0.,0.),math.radians(20),math.radians(-15),math.pi/2)
+        nose_north_up=frd_to_neu((1.,0.,0.),0,math.radians(15),0)
+        self.assertGreater(nose_east[1],.9)
+        self.assertGreater(project_neu(nose_east,0,math.pi/2)[0],0)
+        self.assertGreater(nose_north_up[0],.9)
+        self.assertGreater(nose_north_up[2],.2)
+
+    def test_scene_projection_depth_orders_far_faces_before_near_faces(self):
+        # With the camera elevated, higher NEU points are nearer (smaller depth).
+        _,up_screen,near_depth=project_neu((0.,0.,1.),0,math.pi/4)
+        _,down_screen,far_depth=project_neu((0.,0.,-1.),0,math.pi/4)
+        self.assertGreater(up_screen,down_screen)
+        self.assertLess(near_depth,far_depth)
+
     def test_stationary_speed_is_zero(self):
         velocity=0.
         for _ in range(200):

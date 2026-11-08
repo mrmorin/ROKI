@@ -19,6 +19,23 @@ CAL_POSES=[
  ('Шаг 5 из 6','Нос Type-C от себя. Поднимите правый длинный край платы вверх.'),
  ('Шаг 6 из 6','Нос Type-C от себя. Опустите правый длинный край платы вниз.'),
 ]
+
+def frd_to_neu(point,roll,pitch,yaw):
+ """Rotate a body-FRD vector into world N/E/Up using telemetry RPY."""
+ x,y,z=point;cr,sr=math.cos(roll),math.sin(roll);cp,sp=math.cos(pitch),math.sin(pitch);cy,sy=math.cos(yaw),math.sin(yaw)
+ north=cp*cy*x+(sr*sp*cy-cr*sy)*y+(cr*sp*cy+sr*sy)*z
+ east=cp*sy*x+(sr*sp*sy+cr*cy)*y+(cr*sp*sy-sr*cy)*z
+ down=-sp*x+sr*cp*y+cr*cp*z
+ return north,east,-down
+
+def project_neu(point,azimuth,elevation):
+ """Return screen-right, screen-up and camera depth for world N/E/Up."""
+ north,east,up=point;right=math.cos(azimuth)*east-math.sin(azimuth)*north;depth=math.sin(azimuth)*east+math.cos(azimuth)*north
+ # Positive north is screen-up in the top view.  Smaller depth is nearer.
+ vertical=math.cos(elevation)*up+math.sin(elevation)*depth
+ camera_depth=math.cos(elevation)*depth-math.sin(elevation)*up
+ return right,vertical,camera_depth
+
 class App(tk.Tk):
  def __init__(self):
   super().__init__();self.title("ROKI — испытание ESP-NOW LR");self.geometry("1280x820");self.minsize(1060,680);self.configure(bg='#16110d');style=ttk.Style(self);style.theme_use('clam');style.configure('.',background='#16110d',foreground='#f1e6d5',fieldbackground='#24180f',bordercolor='#754417',lightcolor='#754417',darkcolor='#0b0907');style.configure('TFrame',background='#16110d');style.configure('TLabel',background='#16110d',foreground='#f1e6d5');style.configure('TLabelframe',background='#16110d',bordercolor='#754417',relief='solid');style.configure('TLabelframe.Label',background='#16110d',foreground='#f5a23b',font=('Segoe UI',10,'bold'));style.configure('TButton',background='#713c10',foreground='#fff0d5',bordercolor='#d78225',padding=(8,4));style.map('TButton',background=[('active','#a65d18'),('pressed','#4b260c')]);style.configure('TCombobox',fieldbackground='#24180f',background='#713c10',foreground='#fff0d5',arrowcolor='#f5a23b');style.configure('Horizontal.TScale',background='#16110d',troughcolor='#382312',sliderlength=15);style.configure('TNotebook',background='#16110d',borderwidth=0);style.configure('TNotebook.Tab',background='#24180f',foreground='#d7c5aa',padding=(12,6));style.map('TNotebook.Tab',background=[('selected','#713c10')],foreground=[('selected','#fff0d5')]);self.q=queue.Queue();self.ser=None;self.record=None;self.writer=None;self.record_path=None;self.record_stats={};self.run=0;self.rssi=deque(maxlen=3000);self.altitude_history=deque(maxlen=3000);self.pps_history=deque(maxlen=90);self.g_history=deque(maxlen=3000);self.speed_history=deque(maxlen=3000);self.last=time.monotonic();self.last_flush=time.monotonic();self.next_render=0;self.stats={};self.imu_last=None;self.imu_rendered=None;self.roll=self.pitch=self.yaw=0.;self.vehicle_mesh=self.load_vehicle_mesh();self.cal_running=False;self.cal_seen_active=False;self.cal_step=0;self.cal_phase='idle';self.cal_start_attempts=0;self.cal_start_at=0.;self.cal_text=tk.StringVar(value='Нажмите «НАЧАТЬ КАЛИБРОВКУ». Затем программа покажет первое положение.');self.qnh_pa=QNH_PA;self.current_pressure=0;self.baro_ref=tk.StringVar(value='175');self.baro_status=tk.StringVar(value='QNH —');self.baro_pressure=tk.StringVar(value='Давление — Pa');self.baro_calibrated=False;self.mass=tk.StringVar(value='');self.load_settings();self.play_rows=[];self.play_times=[];self.play_index=-1;self.play_time=0.;self.playing=False;self.playback_active=False;self.play_clock=0.;self.play_speed=tk.StringVar(value='1×');self.play_pos=tk.DoubleVar(value=0.);self.play_seeking=False;self.play_last_second=-1;self.play_name=tk.StringVar(value='Лог не загружен');self.play_time_text=tk.StringVar(value='00:00 / 00:00')
@@ -345,7 +362,7 @@ class App(tk.Tk):
    if self.vehicle_mesh and state==self.imu_rendered:return
    self.imu_rendered=state;c.delete('all');trail=self.trajectory or [(0.,0.,0.)];extent=max(2.,max(max(abs(v) for v in p) for p in trail)*1.35);field_scale=min(w,h)*.32/extent*self.scene_zoom;field_cx=w*.52+self.scene_pan[0];field_cy=h*.65+self.scene_pan[1]
    def world(p):
-    north,east,up=p;az=self.scene_azimuth;el=self.scene_elevation;right=math.cos(az)*east-math.sin(az)*north;depth=math.sin(az)*east+math.cos(az)*north;vertical=math.cos(el)*up-math.sin(el)*depth;return field_cx+field_scale*right,field_cy-field_scale*vertical
+    right,vertical,_=project_neu(p,self.scene_azimuth,self.scene_elevation);return field_cx+field_scale*right,field_cy-field_scale*vertical
    for i in range(-4,5):
     a=i*extent/4;c.create_line(*world((a,-extent,0)),*world((a,extent,0)),fill='#342519');c.create_line(*world((-extent,a,0)),*world((extent,a,0)),fill='#342519')
    c.create_line(*world((0,0,0)),*world((extent*.7,0,0)),fill='#8d6130',width=2,arrow='last');c.create_line(*world((0,0,0)),*world((0,extent*.7,0)),fill='#8d6130',width=2,arrow='last');c.create_text(*world((extent*.75,0,0)),text='N',fill='#d9b88e',anchor='sw');c.create_text(*world((0,extent*.75,0)),text='E',fill='#d9b88e',anchor='sw')
@@ -356,15 +373,10 @@ class App(tk.Tk):
     c.create_line(*flat,fill='#f5a23b',width=2,dash=(6,4))
    model_origin=self.trajectory_position if self.trajectory else (0.,0.,0.);model_world=extent*.62
    def rotate(p):
-    # Exactly the body-FRD -> world-NED matrix used by the ESP32, then NED
-    # down is converted to the scene's up axis.  +X is the physical nose.
-    x,y,z=p;cr,sr=math.cos(roll),math.sin(roll);cp,sp=math.cos(pitch),math.sin(pitch);cy,sy=math.cos(yaw),math.sin(yaw)
-    north=cp*cy*x+(sr*sp*cy-cr*sy)*y+(cr*sp*cy+sr*sy)*z
-    east=cp*sy*x+(sr*sp*sy+cr*cy)*y+(cr*sp*sy-sr*cy)*z
-    down=-sp*x+sr*cp*y+cr*cp*z
-    return north,east,-down
+    # Same body-FRD -> world-NED matrix as the ESP32, then NED down -> scene up.
+    return frd_to_neu(p,roll,pitch,yaw)
    def point(p):
-    north,east,up=rotate(p);north+=model_origin[0]+north*(model_world-1);east+=model_origin[1]+east*(model_world-1);up+=model_origin[2]+up*(model_world-1);x,y=world((north,east,up));depth=math.sin(self.scene_azimuth)*east+math.cos(self.scene_azimuth)*north;return x,y,depth
+    north,east,up=rotate(p);north+=model_origin[0]+north*(model_world-1);east+=model_origin[1]+east*(model_world-1);up+=model_origin[2]+up*(model_world-1);right,vertical,depth=project_neu((north,east,up),self.scene_azimuth,self.scene_elevation);return field_cx+field_scale*right,field_cy-field_scale*vertical,depth
    def face(points,color,edge='#d7b66a'):
     q=[point(p) for p in points];c.create_polygon(*[v for p in q for v in p[:2]],fill=color,outline=edge);return sum(p[2] for p in q)/len(q)
    caption=(CAL_POSES[min(self.cal_step,5)][0]+' · фиксация положения') if self.cal_running else '3D-сцена'
@@ -383,7 +395,8 @@ class App(tk.Tk):
     meshes+=[([nozzle[i] for i in f],col) for f,col in [((0,1,5,4),'#6e4b20'),((1,2,6,5),'#8c6429'),((2,3,7,6),'#b38843'),((3,0,4,7),'#765022')]]
     meshes+=[(p,col) for p,col in [([(-.62,-.18,-.18),(-.90,-.54,-.04),(-.18,-.40,-.04),(-.18,-.18,-.18)],'#9b7132'),([(-.62,.18,-.18),(-.90,.54,-.04),(-.18,.40,-.04),(-.18,.18,-.18)],'#c49a54'),([(-.62,-.18,.18),(-.90,-.45,.34),(-.18,-.34,.18),(-.18,-.18,.18)],'#b47f2e')]]
     tail=(-.98,0,0);nose=(.98,0,0);ahead=(1.22,0,0)
-   for pts,col in sorted(meshes,key=lambda m:sum(point(p)[2] for p in m[0])/len(m[0])):face(pts,col,'' if self.vehicle_mesh else '#d7b66a')
+   # Canvas paints later polygons on top: draw farther camera-depth faces first.
+   for pts,col in sorted(meshes,key=lambda m:sum(point(p)[2] for p in m[0])/len(m[0]),reverse=True):face(pts,col,'' if self.vehicle_mesh else '#d7b66a')
    tail=point(tail);nose=point(nose);ahead=point(ahead);c.create_line(tail[0],tail[1],ahead[0],ahead[1],fill='#d7b66a',dash=(4,3));c.create_text(ahead[0],ahead[1],text='▲',fill='#f2c35d',anchor='center',font=('Segoe UI',13,'bold'))
  def draw(self):
   alt_low,alt_high=self.nice_axis(list(self.altitude_history),min_span=12)
