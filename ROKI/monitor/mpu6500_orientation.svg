@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="700" viewBox="0 0 1100 700">
+  <defs>
+    <marker id="arrow-orange" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 Z" fill="#f5a23b"/></marker>
+    <marker id="arrow-green" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 Z" fill="#62d39b"/></marker>
+  </defs>
+  <rect width="1100" height="700" fill="#16110d"/>
+  <text x="550" y="58" text-anchor="middle" fill="#fff0d5" font-family="Segoe UI, Arial" font-size="30" font-weight="700">MPU6500: монтаж для ROKI</text>
+  <text x="550" y="92" text-anchor="middle" fill="#c9b79b" font-family="Segoe UI, Arial" font-size="18">Вид сверху: аппарат направлен к носу / USB-C</text>
+
+  <rect x="310" y="130" width="480" height="445" rx="32" fill="#25170f" stroke="#ad641b" stroke-width="4"/>
+  <rect x="440" y="110" width="220" height="52" rx="10" fill="#e6a24e"/>
+  <text x="550" y="144" text-anchor="middle" fill="#25170f" font-family="Segoe UI, Arial" font-size="21" font-weight="700">USB-C · НОС</text>
+  <path d="M550 110 L550 76" stroke="#f5a23b" stroke-width="6" marker-end="url(#arrow-orange)"/>
+  <text x="570" y="85" fill="#f5a23b" font-family="Segoe UI, Arial" font-size="20" font-weight="700">ВПЕРЁД</text>
+
+  <rect x="407" y="250" width="286" height="205" rx="14" fill="#15507a" stroke="#83bfe5" stroke-width="4"/>
+  <circle cx="440" cy="282" r="11" fill="#f5a23b"/>
+  <rect x="477" y="286" width="146" height="124" rx="11" fill="#202329" stroke="#c8d1d9" stroke-width="3"/>
+  <text x="550" y="344" text-anchor="middle" fill="#f1e6d5" font-family="Segoe UI, Arial" font-size="22" font-weight="700">MPU6500</text>
+  <text x="550" y="373" text-anchor="middle" fill="#aeb9c2" font-family="Segoe UI, Arial" font-size="16">чипом вверх</text>
+  <text x="550" y="432" text-anchor="middle" fill="#dce7ef" font-family="Segoe UI, Arial" font-size="16">плата датчика</text>
+
+  <path d="M550 250 L550 184" stroke="#62d39b" stroke-width="7" marker-end="url(#arrow-green)"/>
+  <text x="572" y="210" fill="#62d39b" font-family="Segoe UI, Arial" font-size="23" font-weight="700">+Y · ВПЕРЁД</text>
+  <path d="M693 353 L757 353" stroke="#62d39b" stroke-width="7" marker-end="url(#arrow-green)"/>
+  <text x="707" y="338" fill="#62d39b" font-family="Segoe UI, Arial" font-size="23" font-weight="700">+X</text>
+  <text x="707" y="380" fill="#c9b79b" font-family="Segoe UI, Arial" font-size="17">ПРАВЫЙ БОРТ</text>
+  <circle cx="550" cy="353" r="31" fill="none" stroke="#62d39b" stroke-width="5"/>
+  <circle cx="550" cy="353" r="9" fill="#62d39b"/>
+  <text x="566" y="492" fill="#62d39b" font-family="Segoe UI, Arial" font-size="22" font-weight="700">+Z · ВВЕРХ, из платы</text>
+
+  <text x="550" y="625" text-anchor="middle" fill="#fff0d5" font-family="Segoe UI, Arial" font-size="21" font-weight="700">Совпадение с прошивкой: body +X = нос, body +Y = правый борт, body +Z = вниз</text>
+  <text x="550" y="657" text-anchor="middle" fill="#c9b79b" font-family="Segoe UI, Arial" font-size="18">Ориентируй по стрелкам X/Y на конкретной плате, а не по ряду выводов.</text>
+</svg>
