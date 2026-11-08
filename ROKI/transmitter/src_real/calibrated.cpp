@@ -13,6 +13,7 @@
 #include <Adafruit_SHT4x.h>
 #include <Adafruit_SHT31.h>
 #include "roki_protocol.h"
+#include "baro_stillness.h"
 
 constexpr uint8_t CH=1,SDA_PIN=6,SCL_PIN=7,LED_PIN=10,BATTERY_ADC_PIN=A0;
 constexpr float G_MS2=9.80665f,G_MILLI_MS2=9806.65f;
@@ -48,10 +49,11 @@ float baroReferencePressure=0,filteredBaroHeight=0,previousRawBaroHeight=0,baroV
 float verticalHeight=0,verticalVelocity=0,verticalAccelBias=0,verticalAccelerationUp=0,previousVerticalAccelerationUp=0,worldAccelerationMagnitude=0;
 float stationaryBaroHeight=0,baroCandidateHeight=0,baroCandidatePreviousHeight=0,baroCandidateVerticalSpeed=0;uint8_t baroCandidateCount=0;
 uint32_t lastGoodBaroUs=0;bool baroOutlier=false;uint8_t verticalQuality=0;uint16_t startupGyroSamples=0;
+BaroStillness baroTrend{};
 void scan(){for(uint8_t address=8;address<120;address++){Wire.beginTransmission(address);if(Wire.endTransmission()==0)Serial.printf("I2C,addr=0x%02X\n",address);}}
 int16_t clamp16(float x){return (int16_t)constrain(x,-32768.f,32767.f);}
 uint16_t clampU16(float x){return (uint16_t)constrain(x,0.f,65535.f);}
-void resetInertial(){inertialReady=false;inertialStationary=false;baroReady=false;accelSaturated=false;velocityClamped=false;dtFault=false;attitudeDynamic=false;baroOutlier=false;verticalQuality=0;q0=1;q1=q2=q3=0;worldAccelerationMagnitude=baroReferencePressure=filteredBaroHeight=previousRawBaroHeight=baroVerticalSpeed=verticalHeight=verticalVelocity=verticalAccelBias=verticalAccelerationUp=previousVerticalAccelerationUp=stationaryBaroHeight=baroCandidateHeight=baroCandidatePreviousHeight=baroCandidateVerticalSpeed=0;baroCandidateCount=0;alignStableAt=stationaryAt=lastBaroUs=lastGoodBaroUs=0;startupGyroSamples=0;for(uint8_t i=0;i<3;i++)startupGyroSum[i]=startupGyroBias[i]=0;sensor.speedMpsCenti=ROKI_SPEED_UNAVAILABLE;sensor.accelerationCenti=sensor.batteryMilliVolts=0;sensor.verticalSpeedCenti=0;sensor.inertialStatus=0;}
+void resetInertial(){inertialReady=false;inertialStationary=false;baroReady=false;accelSaturated=false;velocityClamped=false;dtFault=false;attitudeDynamic=false;baroOutlier=false;verticalQuality=0;q0=1;q1=q2=q3=0;worldAccelerationMagnitude=baroReferencePressure=filteredBaroHeight=previousRawBaroHeight=baroVerticalSpeed=verticalHeight=verticalVelocity=verticalAccelBias=verticalAccelerationUp=previousVerticalAccelerationUp=stationaryBaroHeight=baroCandidateHeight=baroCandidatePreviousHeight=baroCandidateVerticalSpeed=0;baroCandidateCount=0;baroTrend.reset();alignStableAt=stationaryAt=lastBaroUs=lastGoodBaroUs=0;startupGyroSamples=0;for(uint8_t i=0;i<3;i++)startupGyroSum[i]=startupGyroBias[i]=0;sensor.speedMpsCenti=ROKI_SPEED_UNAVAILABLE;sensor.accelerationCenti=sensor.batteryMilliVolts=0;sensor.verticalSpeedCenti=0;sensor.inertialStatus=0;}
 uint8_t readRegister(uint8_t address,uint8_t reg){Wire.beginTransmission(address);Wire.write(reg);if(Wire.endTransmission(false)!=0||Wire.requestFrom((int)address,1)!=1)return 0;return Wire.read();}
 bool writeRegister(uint8_t address,uint8_t reg,uint8_t value){Wire.beginTransmission(address);Wire.write(reg);Wire.write(value);return Wire.endTransmission()==0;}
 bool beginMpu6050(){
@@ -154,7 +156,9 @@ void updateInertial(const float bodyA[3],float bodyG[3],float dt,uint32_t nowUs)
  else{previousVerticalAccelerationUp=0;if(attitudeDynamic)verticalVelocity=.75f*verticalVelocity+.25f*baroVerticalSpeed;}
  // Accelerometer/gyro alone cannot distinguish uniform motion from rest.
  // A ZUPT is therefore allowed only when barometric height is also stable.
- bool baroStill=baroReady&&fabsf(baroVerticalSpeed)<ZUPT_BARO_RATE_MPS&&fabsf(filteredBaroHeight-stationaryBaroHeight)<ZUPT_BARO_SPAN_M;
+ // The additional multi-second barometer trend rejects constant slow motion
+ // which could otherwise satisfy both short-time gates (e.g. 0.1 m/s).
+ bool baroStill=baroReady&&!baroOutlier&&(uint32_t)(nowUs-lastGoodBaroUs)<200000UL&&baroTrend.stable()&&fabsf(baroVerticalSpeed)<ZUPT_BARO_RATE_MPS&&fabsf(filteredBaroHeight-stationaryBaroHeight)<ZUPT_BARO_SPAN_M;
  if(still&&baroStill){if(!stationaryAt)stationaryAt=nowUs;if(nowUs-stationaryAt>=ZUPT_US){verticalAccelBias=.98f*verticalAccelBias+.02f*(-worldAccel[2]);verticalVelocity=0;previousVerticalAccelerationUp=0;inertialStationary=true;}}
  else{stationaryAt=0;inertialStationary=false;if(baroReady)stationaryBaroHeight=filteredBaroHeight;}
  if(fabsf(verticalVelocity)>300.f){velocityClamped=true;verticalVelocity=0;}
@@ -164,7 +168,7 @@ void updateBarometer(uint32_t n){
  lastBmp=n;float pressure=0;if(baroKind==BARO_BMP280)pressure=bmp.readPressure();else if(baroKind==BARO_BME280)pressure=bme.readPressure();else if(baroKind==BARO_BMP3&&bmp3.performReading())pressure=bmp3.pressure;if(pressure<30000||pressure>110000)return;
  sensor.pressurePa=(int32_t)pressure;uint32_t nowUs=micros();if(!baroReferencePressure)baroReferencePressure=pressure;
  float rawHeight=44330.f*(1.f-powf(pressure/baroReferencePressure,.190294957f));
- if(!baroReady){filteredBaroHeight=previousRawBaroHeight=stationaryBaroHeight=rawHeight;lastBaroUs=lastGoodBaroUs=nowUs;baroReady=true;return;}
+ if(!baroReady){filteredBaroHeight=previousRawBaroHeight=stationaryBaroHeight=rawHeight;lastBaroUs=lastGoodBaroUs=nowUs;baroReady=true;baroTrend.add(filteredBaroHeight,nowUs);return;}
  float dt=(nowUs-lastBaroUs)/1000000.f;lastBaroUs=nowUs;if(dt<=0||dt>.5f)return;
  // Reject isolated pressure glitches before they can enter height or velocity.
  // 300 m/s is deliberately above the intended operating envelope.  It keeps
@@ -177,9 +181,10 @@ void updateBarometer(uint32_t n){
   float candidateStep=fabsf(rawHeight-baroCandidateHeight),allowedStep=BARO_RELOCK_NOISE_M+BARO_RELOCK_MAX_RATE_MPS*dt;
   if(!baroCandidateCount||candidateStep>allowedStep){baroCandidateHeight=baroCandidatePreviousHeight=rawHeight;baroCandidateVerticalSpeed=baroVerticalSpeed;baroCandidateCount=1;}else{baroCandidateVerticalSpeed=.7f*baroCandidateVerticalSpeed+.3f*((rawHeight-baroCandidatePreviousHeight)/dt);baroCandidatePreviousHeight=baroCandidateHeight=rawHeight;baroCandidateCount++;}
   if(baroCandidateCount<4)return;
-  filteredBaroHeight=previousRawBaroHeight=baroCandidateHeight;verticalHeight=baroCandidateHeight;baroVerticalSpeed=baroCandidateVerticalSpeed;verticalVelocity=.6f*verticalVelocity+.4f*baroCandidateVerticalSpeed;verticalAccelBias=0;baroCandidateCount=0;baroOutlier=false;
+  filteredBaroHeight=previousRawBaroHeight=baroCandidateHeight;verticalHeight=baroCandidateHeight;baroVerticalSpeed=baroCandidateVerticalSpeed;verticalVelocity=.6f*verticalVelocity+.4f*baroCandidateVerticalSpeed;verticalAccelBias=0;baroCandidateCount=0;baroOutlier=false;baroTrend.reset();
  }else baroCandidateCount=0;
  previousRawBaroHeight=rawHeight;float before=filteredBaroHeight;filteredBaroHeight=.82f*filteredBaroHeight+.18f*rawHeight;
+ baroTrend.add(filteredBaroHeight,nowUs);
  float measuredVz=(filteredBaroHeight-before)/dt;baroVerticalSpeed=.88f*baroVerticalSpeed+.12f*measuredVz;lastGoodBaroUs=nowUs;
  if(inertialReady){float innovation=filteredBaroHeight-verticalHeight;verticalHeight+=.16f*innovation;verticalVelocity+=.08f*(baroVerticalSpeed-verticalVelocity);verticalAccelBias-=.0008f*innovation;verticalAccelBias=constrain(verticalAccelBias,-1.5f,1.5f);}
 }

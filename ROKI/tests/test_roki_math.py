@@ -2,22 +2,30 @@ import csv
 import io
 import math
 import unittest
+from collections import deque
 from pathlib import Path
-from ROKI.monitor.roki_monitor import frd_to_neu, project_neu
+from ROKI.monitor.roki_math import frd_to_neu, project_neu, build_playback_timeline
 
 G = 9.80665
 ZUPT_BARO_RATE_MPS = .18
 ZUPT_BARO_SPAN_M = .30
 
 def simulate_zupt(raw_heights, gyro_mrad=0., dt=.05):
-    """Independent model of the firmware's baro filter and ZUPT gate."""
-    filtered=rate=anchor=None; run=best=0.
-    for raw in raw_heights:
+    """Reference model of both short-time and multi-second ZUPT checks."""
+    filtered=rate=anchor=None; run=best=0.; history=deque(maxlen=80)
+    for sample,raw in enumerate(raw_heights):
         if filtered is None:
-            filtered=anchor=raw; rate=0.; continue
+            filtered=anchor=raw; rate=0.; history.append((0.,filtered)); continue
         before=filtered; filtered=.82*filtered+.18*raw
         measured=(filtered-before)/dt; rate=.88*rate+.12*measured
-        baro_still=abs(rate)<ZUPT_BARO_RATE_MPS and abs(filtered-anchor)<ZUPT_BARO_SPAN_M
+        history.append((sample*dt,filtered))
+        trend_still=False
+        if len(history)==80 and history[-1][0]-history[0][0]>=3.5:
+            n=len(history); st=sum(t for t,_ in history); sy=sum(y for _,y in history)
+            stt=sum(t*t for t,_ in history); sty=sum(t*y for t,y in history)
+            slope=(n*sty-st*sy)/(n*stt-st*st)
+            trend_still=abs(slope)<.035
+        baro_still=trend_still and abs(rate)<ZUPT_BARO_RATE_MPS and abs(filtered-anchor)<ZUPT_BARO_SPAN_M
         if gyro_mrad<80. and baro_still:
             run+=dt
             if run>=.65: best=max(best,run)
@@ -68,17 +76,18 @@ class BaroGate:
         self.prev=self.height=raw; self.count=0; return True
 
 class RokiMathTests(unittest.TestCase):
-    def test_zupt_stationary_ten_seconds_with_recorded_baro_noise(self):
+    def test_zupt_stationary_recorded_eight_seconds_with_baro_noise(self):
         path=Path(__file__).parents[1]/'monitor'/'logs'/'ROKI_NORMAL_28kbps_2026-11-09_045506_001.csv'
         with path.open(encoding='utf-8',newline='') as source:
             rows=list(csv.DictReader(source))[-400::3]
         pressure=[float(row['pressure_pa']) for row in rows];reference=pressure[0]
         heights=[44330*(1-(p/reference)**.190294957) for p in pressure]
-        heights=(heights*2)[:168]  # 10.08 s at the firmware's 60 ms BMP cadence.
-        self.assertGreaterEqual(simulate_zupt(heights,gyro_mrad=16,dt=.06),6.)
+        # The CSV contains ~8 s of actual stillness; do not manufacture 10 s
+        # by repeating it, which conceals long-window drift.
+        self.assertGreater(simulate_zupt(heights,gyro_mrad=16,dt=.06),.8)
 
     def test_zupt_rejects_uniform_climb_and_descent(self):
-        for rate in (.5,-.5):
+        for rate in (-.5,-.2,-.15,-.1,-.05,.05,.1,.15,.2,.5):
             with self.subTest(rate=rate):
                 heights=[rate*.05*i for i in range(200)]
                 self.assertEqual(simulate_zupt(heights,dt=.05),0.)
@@ -88,7 +97,7 @@ class RokiMathTests(unittest.TestCase):
 
     def test_zupt_tolerates_static_baro_noise(self):
         noise=[.00,.18,-.11,.24,-.19,.09,-.05,.14,-.16,.03]*20
-        self.assertGreater(simulate_zupt(noise,gyro_mrad=5,dt=.05),5.)
+        self.assertGreater(simulate_zupt(noise,gyro_mrad=5,dt=.05),3.)
 
     def test_recorded_packet_loss_is_before_receiver_queue(self):
         path=Path(__file__).parents[1]/'monitor'/'logs'/'ROKI_NORMAL_28kbps_2026-11-09_045506_001.csv'
@@ -134,9 +143,9 @@ class RokiMathTests(unittest.TestCase):
         self.assertAlmostEqual(velocity,0.)
 
     def test_uniform_vertical_motion_blocks_zupt(self):
-        imu_still=True; baro_rate=.5; baro_span=.20
-        zupt = imu_still and abs(baro_rate)<.08 and abs(baro_span)<.12
-        self.assertFalse(zupt)
+        # Regression guard must reject 0.1 m/s even when the short-time rate
+        # and span are below the firmware's current 0.18/0.30 gates.
+        self.assertEqual(simulate_zupt([.1*.05*i for i in range(300)]),0.)
 
     def test_roll_pitch_signs(self):
         self.assertGreater(euler(q_from_euler( math.radians(30),0,0))[0],0)
@@ -201,7 +210,22 @@ class RokiMathTests(unittest.TestCase):
 
     def test_csv_timestamps_preserve_intervals(self):
         rows=list(csv.DictReader(io.StringIO('received_at,tx_ms\n2026-01-01T00:00:00.000,100\n2026-01-01T00:00:00.020,120\n2026-01-01T00:00:00.060,160\n')))
-        intervals=[(int(rows[i]['tx_ms'])-int(rows[i-1]['tx_ms']))/1000 for i in range(1,len(rows))]
+        times=build_playback_timeline(rows)
+        intervals=[round(times[i]-times[i-1],3) for i in range(1,len(rows))]
         self.assertEqual(intervals,[.02,.04])
+
+    def test_csv_delivery_burst_does_not_collapse_time(self):
+        rows=[{'received_at':'2026-01-01T00:00:00.000','tx_ms':str(x)} for x in (100,120,160,180)]
+        self.assertEqual([round(t,3) for t in build_playback_timeline(rows)],[0.,.02,.06,.08])
+
+    def test_csv_tx_restart_and_missing_timestamps(self):
+        rows=[{'received_at':f'2026-01-01T00:00:00.{ms:03d}','tx_ms':str(tx)}
+              for ms,tx in ((0,1000),(20,1020),(70,1),(90,21))]
+        self.assertEqual([round(t,3) for t in build_playback_timeline(rows)],[0.,.02,.07,.09])
+
+    def test_csv_tx_millis_rollover(self):
+        rows=[{'received_at':'2026-01-01T00:00:00.000','tx_ms':str(2**32-10)},
+              {'received_at':'2026-01-01T00:00:00.000','tx_ms':'10'}]
+        self.assertEqual([round(t,3) for t in build_playback_timeline(rows)],[0.,.02])
 
 if __name__ == '__main__': unittest.main()

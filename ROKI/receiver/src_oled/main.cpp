@@ -26,9 +26,35 @@ void screen(float loss){
   if(!link){
     // Do not show stale radio statistics as though they were live measurements.
     if((millis()/450)%2==0){oled.setTextSize(2);oled.setCursor(52,19);oled.print("NO");oled.setCursor(28,41);oled.print("SIGNAL");}
+    oled.setTextSize(1);oled.setCursor(0,0);oled.print("ROKI / RX WAITING");
     oled.display();return;
   }
-  oled.setTextSize(1);int pct=constrain((rssi+100)*100/70,0,100);bool lowPower=telemetry.estimatorStatus&(1<<8);oled.drawRect(0,0,99,9,SSD1306_WHITE);for(int i=0;i<6;i++)if(pct>(i*100/6))oled.fillRect(2+i*16,2,13,5,SSD1306_WHITE);for(int i=0;i<(lowPower?1:3);i++)oled.fillRect(105+i*6,7-i*2,4,2+i*2,SSD1306_WHITE);oled.setCursor(0,13);oled.printf("RSSI %d dBm  %s",rssi,lowPower?"LOW":"MAX");oled.setCursor(0,29);oled.printf("PPS %.0f  %.1f kb/s",lastPps,lastKbps);oled.setCursor(0,45);oled.printf("LOSS %.2f%% GAP %lums",loss,(unsigned long)maxGap);oled.setCursor(0,55);if(telemetry.batteryMilliVolts)oled.printf("BATT %.3f V",telemetry.batteryMilliVolts/1000.f);else oled.print("BATT --");oled.display();
+  const uint16_t status=telemetry.inertialStatus;
+  const uint8_t quality=(status>>8)&3;
+  const bool velocityValid=quality!=0&&(status&2)&&(status&4);
+  const bool lowPower=telemetry.estimatorStatus&(1<<8);
+  const char* mode=active==NORMAL?"NORM":active==RESERVE?"RSRV":"STRS";
+  oled.setTextSize(1);oled.setCursor(0,0);oled.printf("%s %d dBm",mode,rssi);
+  const int pct=constrain((rssi+100)*100/70,0,100);
+  oled.drawRect(84,0,44,9,SSD1306_WHITE);
+  oled.fillRect(86,2,40*pct/100,5,SSD1306_WHITE);
+  if((millis()/5000)%2==0){
+    oled.setCursor(0,14);oled.print("VZ");
+    oled.setTextSize(2);oled.setCursor(22,13);
+    if(velocityValid)oled.printf("%+.1f",telemetry.verticalSpeedCenti/100.f);
+    else oled.print("--");
+    oled.setTextSize(1);oled.setCursor(0,36);oled.printf("m/s  %s %s",quality==2?"VALID":quality==1?"DEGR":"INVALID",(status&8)?"ZUPT":"MOVE");
+    oled.setCursor(0,47);oled.printf("BARO %s IMU %s",(status&4)?"OK":"--",(sensorFlags&1)?"OK":"--");
+    oled.setCursor(0,57);
+    if(telemetry.batteryMilliVolts)oled.printf("B%.2fV L%.1f%%",telemetry.batteryMilliVolts/1000.f,loss);
+    else oled.printf("B-- L%.1f%%",loss);
+  }else{
+    oled.setCursor(0,14);oled.printf("PPS %-5.1f BW %.1fk",lastPps,lastKbps);
+    oled.setCursor(0,26);oled.printf("LOSS %.1f%%  %s",loss,lowPower?"PWR LOW":"PWR MAX");
+    oled.setCursor(0,38);oled.printf("GAP %lums OVF %lu",(unsigned long)maxGap,(unsigned long)queueOverflow);
+    oled.setCursor(0,50);oled.printf("USB DROP %lu",(unsigned long)usbDrops);
+  }
+  oled.display();
 }
 void setup(){Serial.begin(921600);Serial.setTxTimeoutMs(0);Serial.setRxBufferSize(512);Serial.onEvent(ARDUINO_HW_CDC_RX_EVENT,usbEventCallback);Wire.begin(SDA_PIN,SCL_PIN,400000);oledOK=oled.begin(SSD1306_SWITCHCAPVCC,0x3C)||oled.begin(SSD1306_SWITCHCAPVCC,0x3D);WiFi.mode(WIFI_STA);WiFi.setSleep(false);esp_wifi_set_channel(CH,WIFI_SECOND_CHAN_NONE);esp_wifi_set_protocol(WIFI_IF_STA,WIFI_PROTOCOL_LR);q=xQueueCreate(32,sizeof(Rx));esp_now_init();esp_now_register_recv_cb(recv);esp_now_peer_info_t b{};memcpy(b.peer_addr,BCAST,6);b.channel=CH;b.ifidx=WIFI_IF_STA;esp_now_add_peer(&b);usbPrint("ROKI_RX_READY,oled=%d\n",oledOK);}
 void loop(){

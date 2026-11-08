@@ -6,48 +6,36 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import serial
 from serial.tools import list_ports
+if __package__:
+ from .roki_math import frd_to_neu, project_neu, build_playback_timeline
+else:
+ from roki_math import frd_to_neu, project_neu, build_playback_timeline
 
 MODES={"NORMAL — 28 кбит/с":"NORMAL","RESERVE — 40 кбит/с":"RESERVE","STRESS — 60 кбит/с":"STRESS"}
 QNH_PA=101794.06  # Calibrated at known ground elevation: 175 m.
 APP_DIR=Path(__file__).resolve().parent
 SETTINGS_PATH=APP_DIR/'roki_settings.json'
 CAL_POSES=[
- ('Шаг 1 из 6','Плашмя: микросхема LSM6DS3 сверху.'),
- ('Шаг 2 из 6','Плашмя: микросхема LSM6DS3 снизу.'),
+ ('Шаг 1 из 6','Плашмя: микросхема IMU сверху.'),
+ ('Шаг 2 из 6','Плашмя: микросхема IMU снизу.'),
  ('Шаг 3 из 6','Поставьте на хвост: нос Type-C смотрит строго вверх.'),
  ('Шаг 4 из 6','Поставьте на нос: разъём Type-C смотрит строго вниз.'),
  ('Шаг 5 из 6','Нос Type-C от себя. Поднимите правый длинный край платы вверх.'),
  ('Шаг 6 из 6','Нос Type-C от себя. Опустите правый длинный край платы вниз.'),
 ]
 
-def frd_to_neu(point,roll,pitch,yaw):
- """Rotate a body-FRD vector into world N/E/Up using telemetry RPY."""
- x,y,z=point;cr,sr=math.cos(roll),math.sin(roll);cp,sp=math.cos(pitch),math.sin(pitch);cy,sy=math.cos(yaw),math.sin(yaw)
- north=cp*cy*x+(sr*sp*cy-cr*sy)*y+(cr*sp*cy+sr*sy)*z
- east=cp*sy*x+(sr*sp*sy+cr*cy)*y+(cr*sp*sy-sr*cy)*z
- down=-sp*x+sr*cp*y+cr*cp*z
- return north,east,-down
-
-def project_neu(point,azimuth,elevation):
- """Return screen-right, screen-up and camera depth for world N/E/Up."""
- north,east,up=point;right=math.cos(azimuth)*east-math.sin(azimuth)*north;depth=math.sin(azimuth)*east+math.cos(azimuth)*north
- # Positive north is screen-up in the top view.  Smaller depth is nearer.
- vertical=math.cos(elevation)*up+math.sin(elevation)*depth
- camera_depth=math.cos(elevation)*depth-math.sin(elevation)*up
- return right,vertical,camera_depth
-
 class App(tk.Tk):
  def __init__(self):
   super().__init__();self.title("ROKI — испытание ESP-NOW LR");self.geometry("1280x820");self.minsize(1060,680);self.configure(bg='#16110d');style=ttk.Style(self);style.theme_use('clam');style.configure('.',background='#16110d',foreground='#f1e6d5',fieldbackground='#24180f',bordercolor='#754417',lightcolor='#754417',darkcolor='#0b0907');style.configure('TFrame',background='#16110d');style.configure('TLabel',background='#16110d',foreground='#f1e6d5');style.configure('TLabelframe',background='#16110d',bordercolor='#754417',relief='solid');style.configure('TLabelframe.Label',background='#16110d',foreground='#f5a23b',font=('Segoe UI',10,'bold'));style.configure('TButton',background='#713c10',foreground='#fff0d5',bordercolor='#d78225',padding=(8,4));style.map('TButton',background=[('active','#a65d18'),('pressed','#4b260c')]);style.configure('TCombobox',fieldbackground='#24180f',background='#713c10',foreground='#fff0d5',arrowcolor='#f5a23b');style.configure('Horizontal.TScale',background='#16110d',troughcolor='#382312',sliderlength=15);style.configure('TNotebook',background='#16110d',borderwidth=0);style.configure('TNotebook.Tab',background='#24180f',foreground='#d7c5aa',padding=(12,6));style.map('TNotebook.Tab',background=[('selected','#713c10')],foreground=[('selected','#fff0d5')]);self.q=queue.Queue();self.ser=None;self.record=None;self.writer=None;self.record_path=None;self.record_stats={};self.run=0;self.rssi=deque(maxlen=3000);self.altitude_history=deque(maxlen=3000);self.pps_history=deque(maxlen=90);self.g_history=deque(maxlen=3000);self.speed_history=deque(maxlen=3000);self.last=time.monotonic();self.last_flush=time.monotonic();self.next_render=0;self.stats={};self.imu_last=None;self.imu_rendered=None;self.roll=self.pitch=self.yaw=0.;self.vehicle_mesh=self.load_vehicle_mesh();self.cal_running=False;self.cal_seen_active=False;self.cal_step=0;self.cal_phase='idle';self.cal_start_attempts=0;self.cal_start_at=0.;self.cal_text=tk.StringVar(value='Нажмите «НАЧАТЬ КАЛИБРОВКУ». Затем программа покажет первое положение.');self.qnh_pa=QNH_PA;self.current_pressure=0;self.baro_ref=tk.StringVar(value='175');self.baro_status=tk.StringVar(value='QNH —');self.baro_pressure=tk.StringVar(value='Давление — Pa');self.baro_calibrated=False;self.mass=tk.StringVar(value='');self.load_settings();self.play_rows=[];self.play_times=[];self.play_index=-1;self.play_time=0.;self.playing=False;self.playback_active=False;self.play_clock=0.;self.play_speed=tk.StringVar(value='1×');self.play_pos=tk.DoubleVar(value=0.);self.play_seeking=False;self.play_last_second=-1;self.play_name=tk.StringVar(value='Лог не загружен');self.play_time_text=tk.StringVar(value='00:00 / 00:00')
-  self.trajectory=[];self.trajectory_position=[0.,0.,0.];self.trajectory_velocity=[0.,0.,0.];self.trajectory_accel=[0.,0.,0.];self.trajectory_at=0.;self.trajectory_tx_ms=None;self.trajectory_generation=0;self.rx_queue_overflow=0;self.usb_drops=0;self.protocol_errors=0;self.scene_azimuth=math.radians(35);self.scene_elevation=math.radians(22);self.scene_zoom=1.;self.scene_pan=[0.,0.];self.scene_drag=None
+  self.trajectory=[];self.trajectory_position=[0.,0.,0.];self.trajectory_velocity=[0.,0.,0.];self.trajectory_accel=[0.,0.,0.];self.trajectory_at=0.;self.trajectory_tx_ms=None;self.trajectory_generation=0;self.trajectory_enabled=tk.BooleanVar(value=False);self.rx_queue_overflow=0;self.usb_drops=0;self.protocol_errors=0;self.scene_azimuth=math.radians(35);self.scene_elevation=math.radians(22);self.scene_zoom=1.;self.scene_pan=[0.,0.];self.scene_drag=None
   top=ttk.Frame(self,padding=8);top.pack(fill='x');self.port=tk.StringVar(value='COM9');ttk.Combobox(top,textvariable=self.port,values=[p.device for p in list_ports.comports()],width=8).pack(side='left');ttk.Button(top,text='Подключить',command=self.connect).pack(side='left',padx=4)
   self.mode=tk.StringVar(value=list(MODES)[0]);ttk.Combobox(top,textvariable=self.mode,values=list(MODES),state='readonly',width=22).pack(side='left',padx=4);ttk.Button(top,text='Применить режим',command=lambda:self.send('MODE '+MODES[self.mode.get()])).pack(side='left');self.low_power=tk.BooleanVar(value=False);ttk.Checkbutton(top,text='Низкая мощность (стол)',variable=self.low_power,command=lambda:self.send('POWER LOW' if self.low_power.get() else 'POWER MAX')).pack(side='left',padx=(12,0))
   self.dist=tk.StringVar(value='');ttk.Label(top,text='Расстояние, м').pack(side='left',padx=(18,2));ttk.Entry(top,textvariable=self.dist,width=8).pack(side='left');ttk.Button(top,text='Авто: 30 с',command=lambda:self.send('AUTO 30')).pack(side='left',padx=4)
   playback=ttk.Frame(self,padding=(8,0));playback.pack(fill='x');ttk.Button(playback,text='ОТКРЫТЬ ЛОГ',command=self.open_playback).pack(side='left');self.play_button=ttk.Button(playback,text='▶ ВОСПРОИЗВЕСТИ',command=self.toggle_playback,state='disabled');self.play_button.pack(side='left',padx=4);ttk.Button(playback,text='ЖИВОЙ ПРИЁМ',command=self.leave_playback).pack(side='left');ttk.Label(playback,textvariable=self.play_name,width=34).pack(side='left',padx=(12,4));ttk.Combobox(playback,textvariable=self.play_speed,values=['0.25×','0.5×','1×','2×','4×','8×'],state='readonly',width=6).pack(side='left',padx=4);self.play_slider=ttk.Scale(playback,style='Horizontal.TScale',from_=0,to=1,variable=self.play_pos,command=self.seek_playback);self.play_slider.pack(side='left',fill='x',expand=True,padx=(8,5));ttk.Label(playback,textvariable=self.play_time_text,width=13).pack(side='right')
   tabs=ttk.Notebook(self);tabs.pack(fill='both',expand=True,padx=8,pady=(4,8));flight=ttk.Frame(tabs);setup_tab=ttk.Frame(tabs);tabs.add(flight,text='  ПОЛЁТ  ');tabs.add(setup_tab,text='  ПОДГОТОВКА / КАЛИБРОВКА  ')
   bar=ttk.Frame(flight,padding=(0,4));bar.pack(fill='x');self.rec=tk.StringVar(value='ОСТАНОВЛЕНО');self.link=tk.StringVar(value='НЕТ ПАКЕТОВ');self.file=tk.StringVar(value='');
-  ttk.Button(bar,text='НАЧАТЬ ЗАПИСЬ',command=self.start).pack(side='left');ttk.Button(bar,text='ОСТАНОВИТЬ ЗАПИСЬ',command=self.stop).pack(side='left',padx=5);ttk.Button(bar,text='ПЕРЕЗАГРУЗИТЬ БОРТ',command=self.reboot_mobile).pack(side='left',padx=(14,5));ttk.Label(bar,textvariable=self.rec).pack(side='left',padx=15);ttk.Label(bar,textvariable=self.link).pack(side='left')
-  self.v={x:tk.StringVar(value='—') for x in ('rssi','loss','kbps','pps','mode','power','cpu','gap','duration')};self.s={x:tk.StringVar(value='—') for x in ('acc','gyro','raw_acc','raw_gyro','rpy','altitude','temp','humidity','battery','state','speed','vertical','net_accel','ins')};status_row=ttk.Frame(flight,padding=(0,0));status_row.pack(fill='x');grid=ttk.LabelFrame(status_row,text='Радиоканал',padding=10);grid.pack(fill='both',expand=True)
+  ttk.Button(bar,text='НАЧАТЬ ЗАПИСЬ',command=self.start).pack(side='left');ttk.Button(bar,text='ОСТАНОВИТЬ ЗАПИСЬ',command=self.stop).pack(side='left',padx=5);ttk.Button(bar,text='ПЕРЕЗАГРУЗИТЬ БОРТ',command=self.reboot_mobile).pack(side='left',padx=(14,5));ttk.Label(bar,textvariable=self.rec).pack(side='left',padx=15);ttk.Label(bar,textvariable=self.link).pack(side='left');self.parser_health=tk.StringVar(value='USB: OK');ttk.Label(bar,textvariable=self.parser_health).pack(side='right',padx=(8,0))
+  self.v={x:tk.StringVar(value='—') for x in ('rssi','loss','kbps','pps','mode','power','cpu','gap','duration')};self.s={x:tk.StringVar(value='—') for x in ('acc','gyro','raw_acc','raw_gyro','raw_g','body_g','rpy','altitude','temp','humidity','battery','state','speed','vertical','net_accel','ins')};status_row=ttk.Frame(flight,padding=(0,0));status_row.pack(fill='x');grid=ttk.LabelFrame(status_row,text='Радиоканал',padding=10);grid.pack(fill='both',expand=True)
   for i,(t,k) in enumerate([('RSSI, dBm','rssi'),('Потери, %','loss'),('Поток, кбит/с','kbps'),('Пакеты/с','pps'),('Режим TX','mode'),('Мощность TX','power'),('CPU цикла','cpu'),('Макс. пауза, мс','gap'),('Запись','duration')]):grid.columnconfigure(i,weight=1);ttk.Label(grid,text=t).grid(row=0,column=i,sticky='w',padx=6);ttk.Label(grid,textvariable=self.v[k],font=('Segoe UI',14,'bold')).grid(row=1,column=i,sticky='w',padx=6)
   sensors=ttk.LabelFrame(flight,text='Телеметрия мобильной платы',padding=8);sensors.pack(fill='x',pady=(4,0));telemetry_values=ttk.Frame(sensors);telemetry_values.pack(side='left',fill='x',expand=True)
   for i,(t,k) in enumerate([('Высота ISA, м','altitude'),('Температура, °C','temp'),('Влажность, %','humidity'),('Батарея, V','battery'),('Roll / Pitch / Yaw, °','rpy')]):ttk.Label(telemetry_values,text=t).grid(row=0,column=i,sticky='w',padx=6);ttk.Label(telemetry_values,textvariable=self.s[k],font=('Segoe UI',10,'bold')).grid(row=1,column=i,sticky='w',padx=6)
@@ -56,6 +44,7 @@ class App(tk.Tk):
    lamp=tk.Label(health,text='—',bg='#24180f',fg='#f1e6d5',relief='solid',bd=1,padx=6,pady=2,font=('Segoe UI',9,'bold'));lamp.pack(side='left',padx=2);self.sensor_lamps[key]=lamp
   inertial=ttk.LabelFrame(flight,text='Скорость по IMU / барометру — оценка, не навигационное измерение',padding=6);inertial.pack(fill='x',pady=(4,0))
   for i,(t,k) in enumerate([('Скорость 3D','speed'),('Вертикальная, ↑','vertical'),('Ускорение без g','net_accel'),('Статус оценки','ins')]):ttk.Label(inertial,text=t).grid(row=0,column=i,sticky='w',padx=6);ttk.Label(inertial,textvariable=self.s[k],font=('Segoe UI',10,'bold')).grid(row=1,column=i,sticky='w',padx=6)
+  ttk.Checkbutton(flight,text='Эксперимент: рисовать траекторию по IMU (горизонталь дрейфует без GPS)',variable=self.trajectory_enabled,command=self.reset_trajectory).pack(anchor='w',padx=4,pady=(4,0))
   view=ttk.Frame(flight,padding=(0,8));view.pack(fill='both',expand=True);charts=ttk.Frame(view,width=440);charts.pack(side='left',fill='y',padx=(0,8));charts.pack_propagate(False);charts.columnconfigure(0,weight=1);charts.columnconfigure(1,weight=1);self.alt_canvas=tk.Canvas(charts,width=210,height=104,bg='#130e0a',highlightthickness=0);self.alt_canvas.grid(row=0,column=0,sticky='ew',padx=(0,3),pady=(0,4));self.speed_canvas=tk.Canvas(charts,width=210,height=104,bg='#130e0a',highlightthickness=0);self.speed_canvas.grid(row=0,column=1,sticky='ew',padx=(3,0),pady=(0,4));self.g_canvas=tk.Canvas(charts,width=210,height=104,bg='#130e0a',highlightthickness=0);self.g_canvas.grid(row=1,column=0,sticky='ew',padx=(0,3),pady=4);self.pps_canvas=tk.Canvas(charts,width=210,height=104,bg='#130e0a',highlightthickness=0);self.pps_canvas.grid(row=1,column=1,sticky='ew',padx=(3,0),pady=4);self.rssi_canvas=tk.Canvas(charts,width=440,height=104,bg='#130e0a',highlightthickness=0);self.rssi_canvas.grid(row=2,column=0,columnspan=2,sticky='ew',pady=(4,0));self.imu_canvas=tk.Canvas(view,width=660,height=470,bg='#130e0a',highlightthickness=0,cursor='fleur');self.imu_canvas.pack(side='right',fill='both',expand=True);self.imu_canvas.bind('<ButtonPress-1>',lambda e:self.scene_begin(e,'orbit'));self.imu_canvas.bind('<B1-Motion>',self.scene_drag_move);self.imu_canvas.bind('<ButtonPress-3>',lambda e:self.scene_begin(e,'pan'));self.imu_canvas.bind('<B3-Motion>',self.scene_drag_move);self.imu_canvas.bind('<MouseWheel>',self.scene_wheel);self.imu_canvas.bind('<Button-4>',lambda e:self.scene_wheel(e,1));self.imu_canvas.bind('<Button-5>',lambda e:self.scene_wheel(e,-1))
   ttk.Label(setup_tab,text='Перед испытанием: проверьте датчики, задайте массу и опорную высоту, затем при необходимости выполните калибровку IMU.',wraplength=900,justify='left').pack(anchor='w',padx=12,pady=(12,6))
   calibration=ttk.LabelFrame(setup_tab,text='Калибровка IMU: 6 положений',padding=10);calibration.pack(fill='x',padx=12,pady=4);ttk.Label(calibration,textvariable=self.cal_text,wraplength=650,justify='left').pack(side='left',fill='x',expand=True);self.cal_button=ttk.Button(calibration,text='НАЧАТЬ КАЛИБРОВКУ',command=self.cal_action);self.cal_button.pack(side='right',padx=4)
@@ -63,6 +52,8 @@ class App(tk.Tk):
   configuration=ttk.LabelFrame(setup_tab,text='Параметры мобильной установки',padding=10);configuration.pack(fill='x',padx=12,pady=4);ttk.Label(configuration,text='Масса, кг').pack(side='left');ttk.Entry(configuration,textvariable=self.mass,width=10).pack(side='left',padx=6);ttk.Label(configuration,text='Сохраняется вместе с записью и итоговым отчётом.').pack(side='left',padx=8)
   imu_diag=ttk.LabelFrame(setup_tab,text='Диагностика IMU: исходные оси датчика и тело FRD',padding=8);imu_diag.pack(fill='x',padx=12,pady=4)
   for i,(t,k) in enumerate([('ACC raw, м/с²','raw_acc'),('Gyro raw, рад/с','raw_gyro'),('Gyro FRD, рад/с','gyro'),('ACC FRD, м/с²','acc')]):ttk.Label(imu_diag,text=t).grid(row=0,column=i,sticky='w',padx=8);ttk.Label(imu_diag,textvariable=self.s[k],font=('Segoe UI',10,'bold')).grid(row=1,column=i,sticky='w',padx=8)
+  ttk.Label(imu_diag,text='|ACC raw|, g').grid(row=2,column=0,sticky='w',padx=8,pady=(8,0));ttk.Label(imu_diag,textvariable=self.s['raw_g']).grid(row=3,column=0,sticky='w',padx=8)
+  ttk.Label(imu_diag,text='|ACC FRD|, g').grid(row=2,column=1,sticky='w',padx=8,pady=(8,0));ttk.Label(imu_diag,textvariable=self.s['body_g']).grid(row=3,column=1,sticky='w',padx=8)
   self.after(50,self.drain);self.after(40,self.render_imu);self.after(300,self.auto_connect)
  def candidates(self):
   ps=list(list_ports.comports());named=[p.device for p in ps if p.device=='COM9'];esp=[p.device for p in ps if p.vid==0x303A and p.device not in named];return named+esp+[p.device for p in ps if p.device not in named+esp]
@@ -212,14 +203,9 @@ class App(tk.Tk):
   if not path:return
   try:
    with Path(path).open('r',newline='',encoding='utf-8-sig') as f:rows=list(csv.DictReader(f))
-   rows=[r for r in rows if r.get('received_at')]
+   rows=[r for r in rows if r.get('received_at') or r.get('tx_ms')]
    if not rows:raise ValueError('В файле нет строк телеметрии.')
-   origin=datetime.fromisoformat(rows[0]['received_at'])
-   times=[];last=0.
-   for i,row in enumerate(rows):
-    try:t=max(last,(datetime.fromisoformat(row['received_at'])-origin).total_seconds())
-    except (ValueError,TypeError):t=last+.02 if i else 0.
-    times.append(t);last=t
+   times=build_playback_timeline(rows)
   except (OSError,ValueError,csv.Error) as e:
    messagebox.showerror('Воспроизведение',f'Не удалось прочитать CSV:\n{e}');return
   self.play_rows=rows;self.play_times=times;self.play_index=-1;self.play_time=0.;self.playing=False;self.playback_active=True;self.play_last_second=-1;self.play_clock=time.monotonic();self.play_name.set(Path(path).name);self.play_slider.configure(to=max(times[-1],.01));self.play_button.configure(state='normal',text='▶ ВОСПРОИЗВЕСТИ');self._set_play_position(0.);self._rebuild_playback(0);self.link.set('ЛОГ ЗАГРУЖЕН — ПАУЗА');self.draw()
@@ -311,8 +297,19 @@ class App(tk.Tk):
   if not self.playback_active and time.monotonic()-self.last>1:self.link.set('НЕТ ПАКЕТОВ')
   self.after(50,self.drain)
  def handle(self,line):
+  # Serial delivery can start in the middle of a line after reconnect.  A
+  # malformed frame must not abort the Tkinter receive/drain callback.
+  try:self._handle(line)
+  except (ValueError,IndexError,KeyError,OverflowError):
+   self.serial_parse_errors=getattr(self,'serial_parse_errors',0)+1
+   self.parser_health.set(f'USB: {self.serial_parse_errors} ошибок разбора')
+ def _handle(self,line):
   if self.playback_active and line.startswith(('RX','STATUS')):return
   d=dict(x.split('=',1) for x in line.split(',')[1:] if '=' in x)
+  if line.startswith('RX'):
+   required=('s','x','r','n','m','g','o','f','a','w','ra','rw','rpy','e','p','t','h','i')
+   if any(key not in d for key in required):raise ValueError('incomplete RX line')
+   if any(len(d[key].split('/'))!=count for key,count in (('a',3),('w',3),('ra',3),('rw',3),('rpy',3),('i',5))):raise ValueError('malformed sensor vector')
   if line.startswith('RX') and 's' in d:
     a=d.get('a','0/0/0').split('/');w=d.get('w','0/0/0').split('/');ra=d.get('ra','0/0/0').split('/');rw=d.get('rw','0/0/0').split('/');rpy=d.get('rpy','0/0/0').split('/');ins=d.get('i','0/0/0/0/0').split('/');d.update({'seq':d.get('s','0'),'tx_ms':d.get('x',''),'rssi':d.get('r','-127'),'len':d.get('n','0'),'mode':d.get('m','0'),'gap':d.get('g','0'),'loss':d.get('o','0'),'flags':d.get('f','0'),'ax':a[0],'ay':a[1],'az':a[2],'gx':w[0],'gy':w[1],'gz':w[2],'rawax':ra[0],'raway':ra[1],'rawaz':ra[2],'rawgx':rw[0],'rawgy':rw[1],'rawgz':rw[2],'roll':rpy[0],'pitch':rpy[1],'yaw':rpy[2],'est':d.get('e','0'),'pressure':d.get('p','0'),'temp_centi':d.get('t','0'),'humidity_centi':d.get('h','0'),'speed':ins[0],'battery_mv':ins[1],'vertical':ins[2],'net_accel':ins[3],'ins_status':ins[4],'crc':'OK'})
   if line.startswith('RX'):
@@ -330,16 +327,16 @@ class App(tk.Tk):
   rawax,raway,rawaz=[int(d.get(k,0))/100 for k in ('rawax','raway','rawaz')];rawgx,rawgy,rawgz=[int(d.get(k,0))/1000 for k in ('rawgx','rawgy','rawgz')]
   roll,pitch,yaw=[int(d.get(k,0))/100 for k in ('roll','pitch','yaw')];yaw_signed=(yaw+180)%360-180;pressure=int(d.get('pressure',0));temp=int(d.get('temp_centi',0))/100;humidity=int(d.get('humidity_centi',0))/100;battery=int(d.get('battery_mv',0))/1000;speed_raw=int(d.get('speed',65535));speed=None if speed_raw==65535 else speed_raw/100;speed_kmh=None if speed is None else speed*3.6;vertical=int(d.get('vertical',0))/100;net_accel=int(d.get('net_accel',0))/100;flags=int(d.get('flags',0));est=int(d.get('est',0));ins=int(d.get('ins_status',0));self.low_power.set(bool(est&(1<<8)));self.v['power'].set('НИЗКАЯ · 2 dBm' if est&(1<<8) else 'МАКС. · 21 dBm');self.v['cpu'].set(f'{(est>>9)&0x7F}%')
   if not from_log:self.update_calibration(flags)
-  quality=('INVALID','DEGRADED','VALID','INVALID')[(ins>>8)&3];self.current_pressure=pressure;self.baro_pressure.set(f'Давление {pressure:,} Pa'.replace(',',' ')) if pressure else self.baro_pressure.set('Давление — Pa');altitude=44330*(1-(pressure/self.qnh_pa)**0.190294957) if pressure>0 else 0;self.altitude_history.append(altitude);self.g_history.append(math.sqrt(ax*ax+ay*ay+az*az)/9.80665);self.speed_history.append(vertical)
+  quality=('INVALID','DEGRADED','VALID','INVALID')[(ins>>8)&3];self.current_pressure=pressure;self.baro_pressure.set(f'Давление {pressure:,} Pa'.replace(',',' ')) if pressure else self.baro_pressure.set('Давление — Pa');altitude=44330*(1-(pressure/self.qnh_pa)**0.190294957) if pressure>0 else 0;self.altitude_history.append(altitude);self.g_history.append(math.sqrt(ax*ax+ay*ay+az*az)/9.80665);self.speed_history.append(vertical if quality!='INVALID' else float('nan'))
   self.roll=math.radians(roll);self.pitch=math.radians(pitch);self.yaw=math.radians(yaw)
-  if (self.record and not from_log) or from_log:
+  if self.trajectory_enabled.get() and ((self.record and not from_log) or from_log):
    if trajectory_dt is None:
     tx=self.number(d.get('tx_ms'),-1);dt=(tx-self.trajectory_tx_ms)/1000 if tx>=0 and self.trajectory_tx_ms is not None else 0.;self.trajectory_tx_ms=tx if tx>=0 else self.trajectory_tx_ms
     if dt<=0 or dt>.25:now=time.monotonic();dt=max(0.,min(now-self.trajectory_at,.25));self.trajectory_at=now
    else:dt=trajectory_dt
    self.integrate_trajectory(ax,ay,az,self.roll,self.pitch,self.yaw,vertical,ins,dt)
   ins_text=('ИНИЦ ' if ins&1 else '')+('ГОТОВ ' if ins&2 else '')+('БАРО ' if ins&4 else '')+('ZUPT ' if ins&8 else '')+('SAT! ' if ins&16 else '')+('Δt! ' if ins&32 else '')+('ЛИМИТ ' if ins&64 else '')+('BARO! ' if ins&128 else '')+('ROT ' if ins&1024 else '')+quality
-  self.s['raw_acc'].set(f'{rawax:.3f} {raway:.3f} {rawaz:.3f}');self.s['raw_gyro'].set(f'{rawgx:.3f} {rawgy:.3f} {rawgz:.3f}');self.s['acc'].set(f'{ax:.3f} {ay:.3f} {az:.3f}');self.s['gyro'].set(f'{gx:.3f} {gy:.3f} {gz:.3f}');self.s['rpy'].set(f'{roll:+.1f}  {pitch:+.1f}  {yaw_signed:+.1f}');self.s['altitude'].set(f'{altitude:.1f}');self.s['temp'].set(f'{temp:.2f}');self.s['humidity'].set(f'{humidity:.2f}');self.s['battery'].set(f'{battery:.3f}' if battery else '—');self.s['state'].set(('IMU ' if flags&1 else 'IMU— ')+('BMP ' if flags&2 else 'BMP— ')+('SHT ' if flags&4 else 'SHT— ')+('ID OK ' if est&1 else 'ID? ')+('EST ' if est&2 else 'EST— ')+('CAL' if est&4 else 'CAL—'));self.update_sensor_health(flags,est,ins);self.s['speed'].set('недоступна');self.s['vertical'].set(f'{vertical:+.2f} м/с · {quality}');self.s['net_accel'].set(f'{net_accel:.2f} м/с²');self.s['ins'].set(ins_text.strip() or 'INVALID')
+  self.s['raw_acc'].set(f'{rawax:.3f} {raway:.3f} {rawaz:.3f}');self.s['raw_g'].set(f'{math.sqrt(rawax*rawax+raway*raway+rawaz*rawaz)/9.80665:.3f} g');self.s['body_g'].set(f'{math.sqrt(ax*ax+ay*ay+az*az)/9.80665:.3f} g');self.s['raw_gyro'].set(f'{rawgx:.3f} {rawgy:.3f} {rawgz:.3f}');self.s['acc'].set(f'{ax:.3f} {ay:.3f} {az:.3f}');self.s['gyro'].set(f'{gx:.3f} {gy:.3f} {gz:.3f}');self.s['rpy'].set(f'{roll:+.1f}  {pitch:+.1f}  {yaw_signed:+.1f}');self.s['altitude'].set(f'{altitude:.1f}');self.s['temp'].set(f'{temp:.2f}');self.s['humidity'].set(f'{humidity:.2f}');self.s['battery'].set(f'{battery:.3f}' if battery else '—');self.s['state'].set(('IMU ' if flags&1 else 'IMU— ')+('BMP ' if flags&2 else 'BMP— ')+('SHT ' if flags&4 else 'SHT— ')+('ID OK ' if est&1 else 'ID? ')+('EST ' if est&2 else 'EST— ')+('CAL' if est&4 else 'CAL—'));self.update_sensor_health(flags,est,ins);self.s['speed'].set('недоступна');self.s['vertical'].set(f'{vertical:+.2f} м/с · {quality}' if quality!='INVALID' else 'недоступна · INVALID');self.s['net_accel'].set(f'{net_accel:.2f} м/с²');self.s['ins'].set(ins_text.strip() or 'INVALID')
   if self.writer and not from_log:
    self.writer.writerow([datetime.now().isoformat(timespec='milliseconds'),d.get('tx_ms',''),self.dist.get(),d.get('seq'),d.get('rssi'),d.get('len'),d.get('crc'),d.get('mode'),d.get('gap'),d.get('loss'),self.v['kbps'].get(),flags,est,rawax,raway,rawaz,rawgx,rawgy,rawgz,ax,ay,az,gx,gy,gz,roll,pitch,yaw,pressure,altitude,temp,humidity,battery,'' if speed is None else speed,'' if speed_kmh is None else speed_kmh,vertical,net_accel,ins,quality,self.rx_queue_overflow,self.usb_drops,self.protocol_errors,self.mass.get(),self.qnh_pa,self.baro_ref.get()])
    self.record_stats['rx']+=1;self.record_stats['rssi_sum']+=int(d.get('rssi',-127));self.record_stats['rssi_min']=min(self.record_stats['rssi_min'],int(d.get('rssi',-127))) if self.record_stats['rx']>1 else int(d.get('rssi',-127));self.record_stats['max_gap']=max(self.record_stats['max_gap'],int(d.get('gap',0)))
@@ -420,12 +417,16 @@ class App(tk.Tk):
   c.create_text(9,7,text=title,fill='#f4d7b3',anchor='nw',font=('Segoe UI',9,'bold'))
   for i in range(4):
    val=high-(high-low)*i/3;y=top+(h-top-bottom)*i/3;c.create_line(left,y,w-right,y,fill='#3b2819');c.create_text(3,y,text=f'{val:.0f}',fill='#ad8964',anchor='w',font=('Segoe UI',7))
-  c.create_text(w-right,h-5,text='сейчас '+(f'{values[-1]:.1f} {unit}' if values else '—'),fill='#d9b88e',anchor='se',font=('Segoe UI',8))
+  latest=values[-1] if values else float('nan')
+  c.create_text(w-right,h-5,text='сейчас '+(f'{latest:.1f} {unit}' if math.isfinite(latest) else '—'),fill='#d9b88e',anchor='se',font=('Segoe UI',8))
   if len(values)<2:return
   target=max(2,int(w-left-right));step=max(1,(len(values)+target-1)//target);data=values[::step]
-  if data[-1]!=values[-1]:data.append(values[-1])
+  if (len(data)-1)*step!=len(values)-1:data.append(values[-1])
   pts=[]
   for i,v in enumerate(data):
+   if not math.isfinite(v):
+    if len(pts)>=4:c.create_line(*pts,fill=color,width=2)
+    pts=[];continue
    x=left+i*(w-left-right)/(len(data)-1);y=top+(high-max(low,min(high,v)))*(h-top-bottom)/(high-low);pts.extend((x,y))
-  c.create_line(*pts,fill=color,width=2)
+  if len(pts)>=4:c.create_line(*pts,fill=color,width=2)
 if __name__=='__main__':App().mainloop()
