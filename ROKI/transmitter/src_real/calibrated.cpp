@@ -17,7 +17,10 @@
 constexpr uint8_t CH=1,SDA_PIN=6,SCL_PIN=7,LED_PIN=10,BATTERY_ADC_PIN=A0;
 constexpr float G_MS2=9.80665f,G_MILLI_MS2=9806.65f;
 constexpr uint32_t IMU_PERIOD_US=4500,INS_ALIGN_US=7000000UL,ZUPT_US=650000UL;
-constexpr float ZUPT_BARO_RATE_MPS=.08f,ZUPT_BARO_SPAN_M=.12f;
+// BMP280 pressure quantisation/noise in the recorded stationary test produces
+// short apparent rate peaks up to 0.35 m/s. A real 0.5 m/s climb/descent
+// still exceeds this gate and resets ZUPT.
+constexpr float ZUPT_BARO_RATE_MPS=.18f,ZUPT_BARO_SPAN_M=.30f;
 // Relock candidates can be moving fast.  Consistency is checked against each
 // barometer interval; 250 m/s intentionally covers the 150 m/s test envelope.
 constexpr float BARO_RELOCK_MAX_RATE_MPS=250.f,BARO_RELOCK_NOISE_M=.5f;
@@ -30,7 +33,7 @@ ImuCalibration cal{CAL_MAGIC,{0,0,0},{1,1,1},{0,0,0},0,0,0,0};
 bool imuOK=false,bmpOK=false,shtOK=false,calValid=false,calActive=false,calCollecting=false,attitudeReady=false,rebootPending=false;
 bool inertialReady=false,inertialStationary=false,baroReady=false,accelSaturated=false,velocityClamped=false,dtFault=false,attitudeDynamic=false;
 RokiMode mode=NORMAL;
-uint32_t seq=0,lastTx=0,lastImuUs=0,lastBmp=0,lastSht=0,lastBattery=0,sweepAt=0,sweepSeconds=30,lastFeedback=0,calAt=0,lastInertialPublish=0,rebootAt=0;
+uint32_t seq=0,lastTx=0,lastImuUs=0,lastBmp=0,lastSht=0,lastBattery=0,sweepAt=0,sweepSeconds=30,lastFeedback=0,calAt=0,lastInertialPublish=0,rebootAt=0,txAttempts=0,txQueued=0,txRejected=0,lastTxReport=0;
 uint32_t alignStableAt=0,stationaryAt=0,lastBaroUs=0;
 uint8_t calStep=0;float calAcc[6][3]{},calGyro[6][3]{},calTemp[6]{},sumAcc[3]{},sumGyro[3]{},sumTemp=0;uint16_t calSamples=0;
 uint8_t imuAddr=0,imuWhoAmI=0;ImuKind imuKind=IMU_NONE;BaroKind baroKind=BARO_NONE;HumidityKind humidityKind=HUM_NONE;float rollRad=0,pitchRad=0,yawRad=0;
@@ -102,9 +105,11 @@ uint8_t finishCalibration(){
  rms=sqrtf(rms/6.f);float posePenalty=(3.f+opposite[0]+opposite[1]+opposite[2])*40.f+orth*35.f+(1.f-determinant)*45.f;
  next.refTempCenti=(int16_t)tempMean;next.imuType=(uint8_t)imuKind;next.imuWho=imuWhoAmI;next.quality=(uint8_t)constrain(100.f-rms/G_MILLI_MS2*400.f-gyroMean/1000.f*20.f-posePenalty,0.f,100.f);
  if(next.quality<70)return 0;
- cal=next;calValid=true;attitudeReady=false;yawRad=0;resetInertial();prefs.putBytes("imuCal",&cal,sizeof(cal));return cal.quality;
+ cal=next;calValid=true;attitudeReady=false;yawRad=0;resetInertial();prefs.putBytes("imuCal",&cal,sizeof(cal));
+ Serial.printf("IMU_CAL_FIT,kind=%u,who=0x%02X,bias=%.1f/%.1f/%.1f,scale=%.5f/%.5f/%.5f,quality=%u\n",(unsigned)imuKind,imuWhoAmI,cal.accBias[0],cal.accBias[1],cal.accBias[2],cal.accScale[0],cal.accScale[1],cal.accScale[2],cal.quality);
+ return cal.quality;
 }
-void finishCapture(){if(calSamples<80){calCollecting=false;return;}for(uint8_t a=0;a<3;a++){calAcc[calStep][a]=sumAcc[a]/calSamples;calGyro[calStep][a]=sumGyro[a]/calSamples;}calTemp[calStep]=sumTemp/calSamples;calCollecting=false;calStep++;if(calStep>=6){uint8_t q=finishCalibration();calActive=false;calStep=0;if(!q){cal.quality=0;calValid=false;}}}
+void finishCapture(){if(calSamples<80){calCollecting=false;return;}for(uint8_t a=0;a<3;a++){calAcc[calStep][a]=sumAcc[a]/calSamples;calGyro[calStep][a]=sumGyro[a]/calSamples;}calTemp[calStep]=sumTemp/calSamples;Serial.printf("IMU_CAL_CAPTURE,step=%u,raw=%.1f/%.1f/%.1f,gyro=%.1f/%.1f/%.1f,temp=%.2f,samples=%u\n",(unsigned)(calStep+1),calAcc[calStep][0],calAcc[calStep][1],calAcc[calStep][2],calGyro[calStep][0],calGyro[calStep][1],calGyro[calStep][2],calTemp[calStep]/100.f,calSamples);calCollecting=false;calStep++;if(calStep>=6){uint8_t q=finishCalibration();calActive=false;calStep=0;if(!q){cal.quality=0;calValid=false;}}}
 void setQuaternionFromEuler(float roll,float pitch,float yaw){float cr=cosf(roll*.5f),sr=sinf(roll*.5f),cp=cosf(pitch*.5f),sp=sinf(pitch*.5f),cy=cosf(yaw*.5f),sy=sinf(yaw*.5f);q0=cr*cp*cy+sr*sp*sy;q1=sr*cp*cy-cr*sp*sy;q2=cr*sp*cy+sr*cp*sy;q3=cr*cp*sy-sr*sp*cy;}
 void updateEulerFromQuaternion(){rollRad=atan2f(2.f*(q0*q1+q2*q3),1.f-2.f*(q1*q1+q2*q2));pitchRad=asinf(constrain(2.f*(q0*q2-q3*q1),-1.f,1.f));yawRad=atan2f(2.f*(q0*q3+q1*q2),1.f-2.f*(q2*q2+q3*q3));if(yawRad<0)yawRad+=2*PI;}
 void updateAttitude(const float bodyA[3],const float bodyG[3],float dt){
@@ -225,4 +230,4 @@ void probeSensors(){
  shtOK=humidityKind!=HUM_NONE;
 }
 void setup(){Serial.begin(115200);pinMode(LED_PIN,OUTPUT);digitalWrite(LED_PIN,LOW);analogReadResolution(12);analogSetPinAttenuation(BATTERY_ADC_PIN,ADC_11db);loadCalibration();resetInertial();Wire.begin(SDA_PIN,SCL_PIN,400000);probeSensors();if(!imuOK){Wire.end();Wire.begin(SDA_PIN,SCL_PIN,100000);probeSensors();}if(!imuOK&&!bmpOK&&!shtOK){Wire.end();Wire.begin(SCL_PIN,SDA_PIN,100000);probeSensors();}if(!imuOK||cal.imuType!=(uint8_t)imuKind||cal.imuWho!=imuWhoAmI){calValid=false;cal.quality=0;}scan();WiFi.mode(WIFI_STA);WiFi.setSleep(false);esp_wifi_set_channel(CH,WIFI_SECOND_CHAN_NONE);esp_wifi_set_protocol(WIFI_IF_STA,WIFI_PROTOCOL_LR);esp_now_init();esp_now_register_recv_cb(recv);esp_now_peer_info_t p{};memcpy(p.peer_addr,BCAST,6);p.channel=CH;p.ifidx=WIFI_IF_STA;esp_now_add_peer(&p);if(Serial)Serial.printf("SENSORS,imu=%d,type=%u,who=0x%02X,bmp=%d,sht=%d,cal_q=%u\n",imuOK,imuKind,imuWhoAmI,bmpOK,shtOK,cal.quality);}
-void loop(){uint32_t n=millis();if(rebootPending&&(int32_t)(n-rebootAt)>=0){delay(10);ESP.restart();}statusLed(n);sample(n);sensor.estimatorStatus=estimatorFlags();if(sweepAt&&n-sweepAt>=sweepSeconds*1000UL){mode=(RokiMode)(((uint8_t)mode+1)%3);sweepAt=n;}if(n-lastTx<20)return;lastTx=n;Packet p{};uint8_t len=packetSize(mode);p.h={ROKI_MAGIC,ROKI_VERSION,TELEMETRY,(uint8_t)mode,(uint8_t)(len-sizeof(Header)),seq++,n,0,telemetryFlags()};memcpy(p.payload,&sensor,sizeof(sensor));p.h.crc=crc16(p.payload,p.h.payloadLen);esp_now_send(BCAST,(uint8_t*)&p,len);}
+void loop(){uint32_t n=millis();if(rebootPending&&(int32_t)(n-rebootAt)>=0){delay(10);ESP.restart();}statusLed(n);sample(n);sensor.estimatorStatus=estimatorFlags();if(sweepAt&&n-sweepAt>=sweepSeconds*1000UL){mode=(RokiMode)(((uint8_t)mode+1)%3);sweepAt=n;}if(n-lastTxReport>=1000){lastTxReport=n;Serial.printf("TX_STATUS,attempt=%lu,queued=%lu,rejected=%lu\n",(unsigned long)txAttempts,(unsigned long)txQueued,(unsigned long)txRejected);}if(n-lastTx<20)return;lastTx=n;Packet p{};uint8_t len=packetSize(mode);p.h={ROKI_MAGIC,ROKI_VERSION,TELEMETRY,(uint8_t)mode,(uint8_t)(len-sizeof(Header)),seq++,n,0,telemetryFlags()};memcpy(p.payload,&sensor,sizeof(sensor));p.h.crc=crc16(p.payload,p.h.payloadLen);txAttempts++;if(esp_now_send(BCAST,(uint8_t*)&p,len)==ESP_OK)txQueued++;else txRejected++;}

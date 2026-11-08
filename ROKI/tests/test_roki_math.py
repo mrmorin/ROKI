@@ -2,9 +2,28 @@ import csv
 import io
 import math
 import unittest
+from pathlib import Path
 from ROKI.monitor.roki_monitor import frd_to_neu, project_neu
 
 G = 9.80665
+ZUPT_BARO_RATE_MPS = .18
+ZUPT_BARO_SPAN_M = .30
+
+def simulate_zupt(raw_heights, gyro_mrad=0., dt=.05):
+    """Independent model of the firmware's baro filter and ZUPT gate."""
+    filtered=rate=anchor=None; run=best=0.
+    for raw in raw_heights:
+        if filtered is None:
+            filtered=anchor=raw; rate=0.; continue
+        before=filtered; filtered=.82*filtered+.18*raw
+        measured=(filtered-before)/dt; rate=.88*rate+.12*measured
+        baro_still=abs(rate)<ZUPT_BARO_RATE_MPS and abs(filtered-anchor)<ZUPT_BARO_SPAN_M
+        if gyro_mrad<80. and baro_still:
+            run+=dt
+            if run>=.65: best=max(best,run)
+        else:
+            run=0.; anchor=filtered
+    return best
 
 def q_from_euler(r, p, y):
     cr, sr, cp, sp, cy, sy = math.cos(r/2), math.sin(r/2), math.cos(p/2), math.sin(p/2), math.cos(y/2), math.sin(y/2)
@@ -49,6 +68,38 @@ class BaroGate:
         self.prev=self.height=raw; self.count=0; return True
 
 class RokiMathTests(unittest.TestCase):
+    def test_zupt_stationary_ten_seconds_with_recorded_baro_noise(self):
+        path=Path(__file__).parents[1]/'monitor'/'logs'/'ROKI_NORMAL_28kbps_2026-11-09_045506_001.csv'
+        with path.open(encoding='utf-8',newline='') as source:
+            rows=list(csv.DictReader(source))[-400::3]
+        pressure=[float(row['pressure_pa']) for row in rows];reference=pressure[0]
+        heights=[44330*(1-(p/reference)**.190294957) for p in pressure]
+        heights=(heights*2)[:168]  # 10.08 s at the firmware's 60 ms BMP cadence.
+        self.assertGreaterEqual(simulate_zupt(heights,gyro_mrad=16,dt=.06),6.)
+
+    def test_zupt_rejects_uniform_climb_and_descent(self):
+        for rate in (.5,-.5):
+            with self.subTest(rate=rate):
+                heights=[rate*.05*i for i in range(200)]
+                self.assertEqual(simulate_zupt(heights,dt=.05),0.)
+
+    def test_zupt_rejects_rotation_without_translation(self):
+        self.assertEqual(simulate_zupt([0.]*200,gyro_mrad=100,dt=.05),0.)
+
+    def test_zupt_tolerates_static_baro_noise(self):
+        noise=[.00,.18,-.11,.24,-.19,.09,-.05,.14,-.16,.03]*20
+        self.assertGreater(simulate_zupt(noise,gyro_mrad=5,dt=.05),5.)
+
+    def test_recorded_packet_loss_is_before_receiver_queue(self):
+        path=Path(__file__).parents[1]/'monitor'/'logs'/'ROKI_NORMAL_28kbps_2026-11-09_045506_001.csv'
+        with path.open(encoding='utf-8',newline='') as source:
+            rows=list(csv.DictReader(source))
+        sequence_loss=sum(max(0,int(new['sequence'])-int(old['sequence'])-1) for new,old in zip(rows[1:],rows[:-1]))
+        self.assertEqual(sequence_loss,77)
+        self.assertEqual(max(int(row['receiver_queue_overflow']) for row in rows),0)
+        self.assertEqual(max(int(row['protocol_errors']) for row in rows),0)
+        self.assertEqual(int(rows[-1]['usb_drops'])-int(rows[0]['usb_drops']),5)
+
     def test_scene_yaw_north_east_west(self):
         # Top view: north is up, east is right. +Yaw is a clockwise turn.
         top_azimuth=0.; top_elevation=math.pi/2; nose=(1.,0.,0.)
