@@ -22,7 +22,7 @@ CAL_POSES=[
 class App(tk.Tk):
  def __init__(self):
   super().__init__();self.title("ROKI — испытание ESP-NOW LR");self.geometry("1280x820");self.minsize(1060,680);self.configure(bg='#16110d');style=ttk.Style(self);style.theme_use('clam');style.configure('.',background='#16110d',foreground='#f1e6d5',fieldbackground='#24180f',bordercolor='#754417',lightcolor='#754417',darkcolor='#0b0907');style.configure('TFrame',background='#16110d');style.configure('TLabel',background='#16110d',foreground='#f1e6d5');style.configure('TLabelframe',background='#16110d',bordercolor='#754417',relief='solid');style.configure('TLabelframe.Label',background='#16110d',foreground='#f5a23b',font=('Segoe UI',10,'bold'));style.configure('TButton',background='#713c10',foreground='#fff0d5',bordercolor='#d78225',padding=(8,4));style.map('TButton',background=[('active','#a65d18'),('pressed','#4b260c')]);style.configure('TCombobox',fieldbackground='#24180f',background='#713c10',foreground='#fff0d5',arrowcolor='#f5a23b');style.configure('Horizontal.TScale',background='#16110d',troughcolor='#382312',sliderlength=15);style.configure('TNotebook',background='#16110d',borderwidth=0);style.configure('TNotebook.Tab',background='#24180f',foreground='#d7c5aa',padding=(12,6));style.map('TNotebook.Tab',background=[('selected','#713c10')],foreground=[('selected','#fff0d5')]);self.q=queue.Queue();self.ser=None;self.record=None;self.writer=None;self.record_path=None;self.record_stats={};self.run=0;self.rssi=deque(maxlen=3000);self.altitude_history=deque(maxlen=3000);self.pps_history=deque(maxlen=90);self.g_history=deque(maxlen=3000);self.speed_history=deque(maxlen=3000);self.last=time.monotonic();self.last_flush=time.monotonic();self.next_render=0;self.stats={};self.imu_last=None;self.imu_rendered=None;self.roll=self.pitch=self.yaw=0.;self.vehicle_mesh=self.load_vehicle_mesh();self.cal_running=False;self.cal_seen_active=False;self.cal_step=0;self.cal_phase='idle';self.cal_start_attempts=0;self.cal_start_at=0.;self.cal_text=tk.StringVar(value='Нажмите «НАЧАТЬ КАЛИБРОВКУ». Затем программа покажет первое положение.');self.qnh_pa=QNH_PA;self.current_pressure=0;self.baro_ref=tk.StringVar(value='175');self.baro_status=tk.StringVar(value='QNH —');self.baro_pressure=tk.StringVar(value='Давление — Pa');self.baro_calibrated=False;self.mass=tk.StringVar(value='');self.load_settings();self.play_rows=[];self.play_times=[];self.play_index=-1;self.play_time=0.;self.playing=False;self.playback_active=False;self.play_clock=0.;self.play_speed=tk.StringVar(value='1×');self.play_pos=tk.DoubleVar(value=0.);self.play_seeking=False;self.play_last_second=-1;self.play_name=tk.StringVar(value='Лог не загружен');self.play_time_text=tk.StringVar(value='00:00 / 00:00')
-  self.trajectory=[];self.trajectory_position=[0.,0.,0.];self.trajectory_velocity=[0.,0.,0.];self.trajectory_accel=[0.,0.,0.];self.trajectory_at=0.;self.trajectory_generation=0;self.scene_azimuth=math.radians(35);self.scene_elevation=math.radians(22);self.scene_zoom=1.;self.scene_pan=[0.,0.];self.scene_drag=None
+  self.trajectory=[];self.trajectory_position=[0.,0.,0.];self.trajectory_velocity=[0.,0.,0.];self.trajectory_accel=[0.,0.,0.];self.trajectory_at=0.;self.trajectory_tx_ms=None;self.trajectory_generation=0;self.rx_queue_overflow=0;self.usb_drops=0;self.protocol_errors=0;self.scene_azimuth=math.radians(35);self.scene_elevation=math.radians(22);self.scene_zoom=1.;self.scene_pan=[0.,0.];self.scene_drag=None
   top=ttk.Frame(self,padding=8);top.pack(fill='x');self.port=tk.StringVar(value='COM9');ttk.Combobox(top,textvariable=self.port,values=[p.device for p in list_ports.comports()],width=8).pack(side='left');ttk.Button(top,text='Подключить',command=self.connect).pack(side='left',padx=4)
   self.mode=tk.StringVar(value=list(MODES)[0]);ttk.Combobox(top,textvariable=self.mode,values=list(MODES),state='readonly',width=22).pack(side='left',padx=4);ttk.Button(top,text='Применить режим',command=lambda:self.send('MODE '+MODES[self.mode.get()])).pack(side='left')
   self.dist=tk.StringVar(value='');ttk.Label(top,text='Расстояние, м').pack(side='left',padx=(18,2));ttk.Entry(top,textvariable=self.dist,width=8).pack(side='left');ttk.Button(top,text='Авто: 30 с',command=lambda:self.send('AUTO 30')).pack(side='left',padx=4)
@@ -107,7 +107,7 @@ class App(tk.Tk):
  def open_port(self,name,silent=True):
   if self.ser and self.ser.is_open:return True
   try:
-   port=serial.Serial();port.port=name;port.baudrate=115200;port.timeout=.15;port.open();port.dtr=True;port.rts=True;port.reset_input_buffer();self.ser=port;self.port.set(name);threading.Thread(target=self.reader,daemon=True).start();self.link.set('ПОДКЛЮЧЕНО — ОЖИДАНИЕ ПАКЕТОВ');return True
+   port=serial.Serial();port.port=name;port.baudrate=921600;port.timeout=.15;port.open();port.dtr=True;port.rts=True;port.reset_input_buffer();self.ser=port;self.port.set(name);threading.Thread(target=self.reader,daemon=True).start();self.link.set('ПОДКЛЮЧЕНО — ОЖИДАНИЕ ПАКЕТОВ');return True
   except Exception as e:
    self.ser=None
    if not silent:messagebox.showerror('COM',str(e))
@@ -174,10 +174,15 @@ class App(tk.Tk):
    self.run+=1;name=f"ROKI_{mode}_{kb}kbps_{datetime.now():%Y-%m-%d_%H%M%S}_{self.run:03}.csv"
    try:self.record=open(log_dir/name,'x',newline='',encoding='utf-8');break
    except FileExistsError:continue
-  self.writer=csv.writer(self.record);self.writer.writerow(['received_at','distance_m','sequence','rssi_dbm','length','crc','mode','gap_ms','loss_pct','kbps','sensor_flags','estimator_status','acc_sensor_x_ms2','acc_sensor_y_ms2','acc_sensor_z_ms2','gyro_sensor_x_rads','gyro_sensor_y_rads','gyro_sensor_z_rads','acc_body_x_ms2','acc_body_y_ms2','acc_body_z_ms2','gyro_body_x_rads','gyro_body_y_rads','gyro_body_z_rads','roll_deg','pitch_deg','yaw_deg','pressure_pa','altitude_isa_m','temperature_c','humidity_pct','battery_voltage_v','speed_imu_est_mps','speed_imu_est_kmh','vertical_speed_mps','acceleration_mps2','inertial_status','vertical_speed_quality','mass_kg','baro_qnh_pa','baro_reference_altitude_m']);self.record_path=log_dir/name;self.record_stats={'rx':0,'rssi_sum':0.,'rssi_min':0,'max_gap':0};self.reset_trajectory();self.imu_rendered=None;self.draw_imu();self.rec.set('ЗАПИСЬ ИДЁТ');self.file.set(name);self.started=time.monotonic();self.save_settings()
+  self.writer=csv.writer(self.record);self.writer.writerow(['received_at','tx_ms','distance_m','sequence','rssi_dbm','length','crc','mode','gap_ms','loss_pct','kbps','sensor_flags','estimator_status','acc_sensor_x_ms2','acc_sensor_y_ms2','acc_sensor_z_ms2','gyro_sensor_x_rads','gyro_sensor_y_rads','gyro_sensor_z_rads','acc_body_x_ms2','acc_body_y_ms2','acc_body_z_ms2','gyro_body_x_rads','gyro_body_y_rads','gyro_body_z_rads','roll_deg','pitch_deg','yaw_deg','pressure_pa','altitude_isa_m','temperature_c','humidity_pct','battery_voltage_v','speed_imu_est_mps','speed_imu_est_kmh','vertical_speed_mps','acceleration_mps2','inertial_status','vertical_speed_quality','receiver_queue_overflow','usb_drops','protocol_errors','mass_kg','baro_qnh_pa','baro_reference_altitude_m']);self.record_path=log_dir/name;self.record_stats={'rx':0,'rssi_sum':0.,'rssi_min':0,'max_gap':0,'mode':''};self.reset_trajectory();self.imu_rendered=None;self.draw_imu();self.rec.set('ЗАПИСЬ ИДЁТ');self.file.set(name);self.started=time.monotonic();self.save_settings()
  def stop(self):
   if self.record:
    duration=time.monotonic()-self.started;path=self.record_path;stats=self.record_stats;self.record.flush();self.record.close();self.record=None;self.writer=None
+   actual=stats.get('mode') or 'UNKNOWN'
+   if path and actual in ('NORMAL','RESERVE','STRESS'):
+    kb={'NORMAL':'28','RESERVE':'40','STRESS':'60'}[actual];parts=path.stem.split('_');renamed=path.with_name(f"ROKI_{actual}_{kb}kbps_{parts[3]}_{parts[4]}_{parts[5]}.csv")
+    try:path.rename(renamed);path=renamed;self.record_path=renamed;self.file.set(renamed.name)
+    except OSError:pass
    if path:
     average=stats['rssi_sum']/stats['rx'] if stats['rx'] else 0
     try:path.with_suffix('.summary.txt').write_text(f'ROKI summary\nfile: {path.name}\nduration_s: {duration:.1f}\nreceived_packets: {stats["rx"]}\nloss_pct: {self.v["loss"].get()}\nrssi_avg_dbm: {average:.2f}\nrssi_min_dbm: {stats["rssi_min"]}\nmax_gap_ms: {stats["max_gap"]}\ndistance_m: {self.dist.get()}\nmass_kg: {self.mass.get()}\nbaro_qnh_pa: {self.qnh_pa:.2f}\nbaro_reference_altitude_m: {self.baro_ref.get()}\n',encoding='utf-8')
@@ -220,7 +225,7 @@ class App(tk.Tk):
  def _reset_visual_history(self):
   self.rssi.clear();self.altitude_history.clear();self.g_history.clear();self.speed_history.clear();self.pps_history.clear();self.roll=self.pitch=self.yaw=0.;self.reset_trajectory();self.imu_rendered=None
  def reset_trajectory(self):
-  self.trajectory_generation+=1;self.trajectory=[(0.,0.,0.)];self.trajectory_position=[0.,0.,0.];self.trajectory_velocity=[0.,0.,0.];self.trajectory_accel=[0.,0.,0.];self.trajectory_at=time.monotonic()
+  self.trajectory_generation+=1;self.trajectory=[(0.,0.,0.)];self.trajectory_position=[0.,0.,0.];self.trajectory_velocity=[0.,0.,0.];self.trajectory_accel=[0.,0.,0.];self.trajectory_at=time.monotonic();self.trajectory_tx_ms=None
  def integrate_trajectory(self,ax,ay,az,roll,pitch,yaw,vertical,ins,dt):
   if dt<=0 or dt>.25:return
   # Body FRD -> world NED, then world NEU.  Acceleration includes gravity.
@@ -242,14 +247,14 @@ class App(tk.Tk):
   if not self.play_rows:return
   target=max(0.,min(target,self.play_times[-1]));index=bisect.bisect_right(self.play_times,target)-1;self._reset_visual_history();self.play_last_second=-1
   first=max(0,index-3000)
-  for i in range(first,index+1):self.apply_rx(self.playback_packet(i),from_log=True,update_rate=False)
+  for i in range(first,index+1):self.apply_rx(self.playback_packet(i),from_log=True,update_rate=False,trajectory_dt=(self.play_times[i]-self.play_times[i-1] if i>first else 0.))
   self.play_index=index;self.play_time=target
   if index>=0:self._update_play_rates(index)
  def update_playback(self):
   if not self.playback_active or not self.playing or not self.play_rows:return False
   target=min(self.play_times[-1],self.play_time+(time.monotonic()-self.play_clock)*self.playback_speed());changed=False
   while self.play_index+1<len(self.play_rows) and self.play_times[self.play_index+1]<=target:
-   self.play_index+=1;self.apply_rx(self.playback_packet(self.play_index),from_log=True,update_rate=False);changed=True
+   self.play_index+=1;self.apply_rx(self.playback_packet(self.play_index),from_log=True,update_rate=False,trajectory_dt=(self.play_times[self.play_index]-self.play_times[self.play_index-1] if self.play_index else 0.));changed=True
   if changed:self._update_play_rates(self.play_index)
   self.play_time=target;self.play_clock=time.monotonic();self._set_play_position(target)
   if target>=self.play_times[-1]:self.playing=False;self.play_button.configure(text='▶ ВОСПРОИЗВЕСТИ');self.link.set('ЛОГ — КОНЕЦ')
@@ -258,7 +263,9 @@ class App(tk.Tk):
   row=self.play_rows[index]
   def value(name,default='0'):return str(row.get(name,default) or default)
   def scaled(name,factor):return str(round(self.number(row.get(name))*factor))
-  return {'seq':value('sequence'),'rssi':value('rssi_dbm','-127'),'len':value('length'),'crc':value('crc','OK'),'mode':value('mode'),'gap':value('gap_ms'),'loss':value('loss_pct'),'flags':value('sensor_flags'),'est':value('estimator_status'),'rawax':scaled('acc_sensor_x_ms2',1000),'raway':scaled('acc_sensor_y_ms2',1000),'rawaz':scaled('acc_sensor_z_ms2',1000),'rawgx':scaled('gyro_sensor_x_rads',1000),'rawgy':scaled('gyro_sensor_y_rads',1000),'rawgz':scaled('gyro_sensor_z_rads',1000),'ax':scaled('acc_body_x_ms2',1000),'ay':scaled('acc_body_y_ms2',1000),'az':scaled('acc_body_z_ms2',1000),'gx':scaled('gyro_body_x_rads',1000),'gy':scaled('gyro_body_y_rads',1000),'gz':scaled('gyro_body_z_rads',1000),'roll':scaled('roll_deg',100),'pitch':scaled('pitch_deg',100),'yaw':scaled('yaw_deg',100),'pressure':value('pressure_pa'),'temp_centi':str(int(self.number(row.get('temperature_c'))*100)),'humidity_centi':str(int(self.number(row.get('humidity_pct'))*100)),'speed':scaled('speed_imu_est_mps',100),'battery_mv':scaled('battery_voltage_v',1000),'vertical':scaled('vertical_speed_mps',100),'net_accel':scaled('acceleration_mps2',100),'ins_status':value('inertial_status')}
+  # CSV stores SI m/s², independent of the binary protocol's compact scale.
+  acc_scale=100
+  return {'seq':value('sequence'),'tx_ms':value('tx_ms'),'rssi':value('rssi_dbm','-127'),'len':value('length'),'crc':value('crc','OK'),'mode':value('mode'),'gap':value('gap_ms'),'loss':value('loss_pct'),'flags':value('sensor_flags'),'est':value('estimator_status'),'rawax':scaled('acc_sensor_x_ms2',acc_scale),'raway':scaled('acc_sensor_y_ms2',acc_scale),'rawaz':scaled('acc_sensor_z_ms2',acc_scale),'rawgx':scaled('gyro_sensor_x_rads',1000),'rawgy':scaled('gyro_sensor_y_rads',1000),'rawgz':scaled('gyro_sensor_z_rads',1000),'ax':scaled('acc_body_x_ms2',acc_scale),'ay':scaled('acc_body_y_ms2',acc_scale),'az':scaled('acc_body_z_ms2',acc_scale),'gx':scaled('gyro_body_x_rads',1000),'gy':scaled('gyro_body_y_rads',1000),'gz':scaled('gyro_body_z_rads',1000),'roll':scaled('roll_deg',100),'pitch':scaled('pitch_deg',100),'yaw':scaled('yaw_deg',100),'pressure':value('pressure_pa'),'temp_centi':str(int(self.number(row.get('temperature_c'))*100)),'humidity_centi':str(int(self.number(row.get('humidity_pct'))*100)),'speed':scaled('speed_imu_est_mps',100),'battery_mv':scaled('battery_voltage_v',1000),'vertical':scaled('vertical_speed_mps',100),'net_accel':scaled('acceleration_mps2',100),'ins_status':value('inertial_status')}
  def number(self,value,default=0.):
   try:return float(value)
   except (TypeError,ValueError):return default
@@ -290,29 +297,34 @@ class App(tk.Tk):
   if self.playback_active and line.startswith(('RX','STATUS')):return
   d=dict(x.split('=',1) for x in line.split(',')[1:] if '=' in x)
   if line.startswith('RX') and 's' in d:
-    a=d.get('a','0/0/0').split('/');w=d.get('w','0/0/0').split('/');ra=d.get('ra','0/0/0').split('/');rw=d.get('rw','0/0/0').split('/');rpy=d.get('rpy','0/0/0').split('/');ins=d.get('i','0/0/0/0/0').split('/');d.update({'seq':d.get('s','0'),'rssi':d.get('r','-127'),'len':d.get('n','0'),'mode':d.get('m','0'),'gap':d.get('g','0'),'loss':d.get('o','0'),'flags':d.get('f','0'),'ax':a[0],'ay':a[1],'az':a[2],'gx':w[0],'gy':w[1],'gz':w[2],'rawax':ra[0],'raway':ra[1],'rawaz':ra[2],'rawgx':rw[0],'rawgy':rw[1],'rawgz':rw[2],'roll':rpy[0],'pitch':rpy[1],'yaw':rpy[2],'est':d.get('e','0'),'pressure':d.get('p','0'),'temp_centi':d.get('t','0'),'humidity_centi':d.get('h','0'),'speed':ins[0],'battery_mv':ins[1],'vertical':ins[2],'net_accel':ins[3],'ins_status':ins[4],'crc':'OK'})
+    a=d.get('a','0/0/0').split('/');w=d.get('w','0/0/0').split('/');ra=d.get('ra','0/0/0').split('/');rw=d.get('rw','0/0/0').split('/');rpy=d.get('rpy','0/0/0').split('/');ins=d.get('i','0/0/0/0/0').split('/');d.update({'seq':d.get('s','0'),'tx_ms':d.get('x',''),'rssi':d.get('r','-127'),'len':d.get('n','0'),'mode':d.get('m','0'),'gap':d.get('g','0'),'loss':d.get('o','0'),'flags':d.get('f','0'),'ax':a[0],'ay':a[1],'az':a[2],'gx':w[0],'gy':w[1],'gz':w[2],'rawax':ra[0],'raway':ra[1],'rawaz':ra[2],'rawgx':rw[0],'rawgy':rw[1],'rawgz':rw[2],'roll':rpy[0],'pitch':rpy[1],'yaw':rpy[2],'est':d.get('e','0'),'pressure':d.get('p','0'),'temp_centi':d.get('t','0'),'humidity_centi':d.get('h','0'),'speed':ins[0],'battery_mv':ins[1],'vertical':ins[2],'net_accel':ins[3],'ins_status':ins[4],'crc':'OK'})
   if line.startswith('RX'):
     self.apply_rx(d)
   elif line.startswith('STATUS'):
-   self.v['pps'].set(d.get('pps','—'));self.v['kbps'].set(d.get('kbps','—'));self.v['gap'].set(d.get('max_gap_ms',self.v['gap'].get()));
+   self.v['pps'].set(d.get('pps','—'));self.v['kbps'].set(d.get('kbps','—'));self.v['gap'].set(d.get('max_gap_ms',self.v['gap'].get()));self.rx_queue_overflow=int(d.get('queue_overflow','0'));self.usb_drops=int(d.get('usb_drops','0'));self.protocol_errors=int(d.get('protocol_err','0'))
    try:self.pps_history.append(float(d.get('pps','0')))
    except ValueError:pass
- def apply_rx(self,d,from_log=False,update_rate=True):
+ def apply_rx(self,d,from_log=False,update_rate=True,trajectory_dt=None):
   if not from_log:self.last=time.monotonic();self.link.set('ПРИЁМ')
   mode_name={'0':'NORMAL','1':'RESERVE','2':'STRESS'}.get(str(d.get('mode','')),str(d.get('mode','—')))
+  if self.record and mode_name in ('NORMAL','RESERVE','STRESS'):self.record_stats['mode']=mode_name
   self.v['rssi'].set(d.get('rssi','—'));self.v['loss'].set(d.get('loss','—'));self.v['mode'].set(mode_name);self.v['gap'].set(d.get('gap','—'));self.rssi.append(int(d.get('rssi','-127')))
-  ax,ay,az=[int(d.get(k,0))/1000 for k in ('ax','ay','az')];gx,gy,gz=[int(d.get(k,0))/1000 for k in ('gx','gy','gz')]
-  rawax,raway,rawaz=[int(d.get(k,0))/1000 for k in ('rawax','raway','rawaz')];rawgx,rawgy,rawgz=[int(d.get(k,0))/1000 for k in ('rawgx','rawgy','rawgz')]
-  roll,pitch,yaw=[int(d.get(k,0))/100 for k in ('roll','pitch','yaw')];yaw_signed=(yaw+180)%360-180;pressure=int(d.get('pressure',0));temp=int(d.get('temp_centi',0))/100;humidity=int(d.get('humidity_centi',0))/100;battery=int(d.get('battery_mv',0))/1000;speed=int(d.get('speed',0))/100;speed_kmh=speed*3.6;vertical=int(d.get('vertical',0))/100;net_accel=int(d.get('net_accel',0))/100;flags=int(d.get('flags',0));est=int(d.get('est',0));ins=int(d.get('ins_status',0))
+  ax,ay,az=[int(d.get(k,0))/100 for k in ('ax','ay','az')];gx,gy,gz=[int(d.get(k,0))/1000 for k in ('gx','gy','gz')]
+  rawax,raway,rawaz=[int(d.get(k,0))/100 for k in ('rawax','raway','rawaz')];rawgx,rawgy,rawgz=[int(d.get(k,0))/1000 for k in ('rawgx','rawgy','rawgz')]
+  roll,pitch,yaw=[int(d.get(k,0))/100 for k in ('roll','pitch','yaw')];yaw_signed=(yaw+180)%360-180;pressure=int(d.get('pressure',0));temp=int(d.get('temp_centi',0))/100;humidity=int(d.get('humidity_centi',0))/100;battery=int(d.get('battery_mv',0))/1000;speed_raw=int(d.get('speed',65535));speed=None if speed_raw==65535 else speed_raw/100;speed_kmh=None if speed is None else speed*3.6;vertical=int(d.get('vertical',0))/100;net_accel=int(d.get('net_accel',0))/100;flags=int(d.get('flags',0));est=int(d.get('est',0));ins=int(d.get('ins_status',0))
   if not from_log:self.update_calibration(flags)
   quality=('INVALID','DEGRADED','VALID','INVALID')[(ins>>8)&3];self.current_pressure=pressure;self.baro_pressure.set(f'Давление {pressure:,} Pa'.replace(',',' ')) if pressure else self.baro_pressure.set('Давление — Pa');altitude=44330*(1-(pressure/self.qnh_pa)**0.190294957) if pressure>0 else 0;self.altitude_history.append(altitude);self.g_history.append(math.sqrt(ax*ax+ay*ay+az*az)/9.80665);self.speed_history.append(vertical)
   self.roll=math.radians(roll);self.pitch=math.radians(pitch);self.yaw=math.radians(yaw)
-  if self.record and not from_log:
-   now=time.monotonic();dt=max(0.,min(now-self.trajectory_at,.25));self.trajectory_at=now;self.integrate_trajectory(ax,ay,az,self.roll,self.pitch,self.yaw,vertical,ins,dt)
+  if (self.record and not from_log) or from_log:
+   if trajectory_dt is None:
+    tx=self.number(d.get('tx_ms'),-1);dt=(tx-self.trajectory_tx_ms)/1000 if tx>=0 and self.trajectory_tx_ms is not None else 0.;self.trajectory_tx_ms=tx if tx>=0 else self.trajectory_tx_ms
+    if dt<=0 or dt>.25:now=time.monotonic();dt=max(0.,min(now-self.trajectory_at,.25));self.trajectory_at=now
+   else:dt=trajectory_dt
+   self.integrate_trajectory(ax,ay,az,self.roll,self.pitch,self.yaw,vertical,ins,dt)
   ins_text=('ИНИЦ ' if ins&1 else '')+('ГОТОВ ' if ins&2 else '')+('БАРО ' if ins&4 else '')+('ZUPT ' if ins&8 else '')+('SAT! ' if ins&16 else '')+('Δt! ' if ins&32 else '')+('ЛИМИТ ' if ins&64 else '')+('BARO! ' if ins&128 else '')+('ROT ' if ins&1024 else '')+quality
-  self.s['raw_acc'].set(f'{rawax:.3f} {raway:.3f} {rawaz:.3f}');self.s['raw_gyro'].set(f'{rawgx:.3f} {rawgy:.3f} {rawgz:.3f}');self.s['acc'].set(f'{ax:.3f} {ay:.3f} {az:.3f}');self.s['gyro'].set(f'{gx:.3f} {gy:.3f} {gz:.3f}');self.s['rpy'].set(f'{roll:+.1f}  {pitch:+.1f}  {yaw_signed:+.1f}');self.s['altitude'].set(f'{altitude:.1f}');self.s['temp'].set(f'{temp:.2f}');self.s['humidity'].set(f'{humidity:.2f}');self.s['battery'].set(f'{battery:.3f}' if battery else '—');self.s['state'].set(('IMU ' if flags&1 else 'IMU— ')+('BMP ' if flags&2 else 'BMP— ')+('SHT ' if flags&4 else 'SHT— ')+('ID OK ' if est&1 else 'ID? ')+('EST ' if est&2 else 'EST— ')+('CAL' if est&4 else 'CAL—'));self.update_sensor_health(flags,est,ins);self.s['speed'].set('не определяется без GPS');self.s['vertical'].set(f'{vertical:+.2f} м/с · {quality}');self.s['net_accel'].set(f'{net_accel:.2f} м/с²');self.s['ins'].set(ins_text.strip() or 'INVALID')
+  self.s['raw_acc'].set(f'{rawax:.3f} {raway:.3f} {rawaz:.3f}');self.s['raw_gyro'].set(f'{rawgx:.3f} {rawgy:.3f} {rawgz:.3f}');self.s['acc'].set(f'{ax:.3f} {ay:.3f} {az:.3f}');self.s['gyro'].set(f'{gx:.3f} {gy:.3f} {gz:.3f}');self.s['rpy'].set(f'{roll:+.1f}  {pitch:+.1f}  {yaw_signed:+.1f}');self.s['altitude'].set(f'{altitude:.1f}');self.s['temp'].set(f'{temp:.2f}');self.s['humidity'].set(f'{humidity:.2f}');self.s['battery'].set(f'{battery:.3f}' if battery else '—');self.s['state'].set(('IMU ' if flags&1 else 'IMU— ')+('BMP ' if flags&2 else 'BMP— ')+('SHT ' if flags&4 else 'SHT— ')+('ID OK ' if est&1 else 'ID? ')+('EST ' if est&2 else 'EST— ')+('CAL' if est&4 else 'CAL—'));self.update_sensor_health(flags,est,ins);self.s['speed'].set('недоступна');self.s['vertical'].set(f'{vertical:+.2f} м/с · {quality}');self.s['net_accel'].set(f'{net_accel:.2f} м/с²');self.s['ins'].set(ins_text.strip() or 'INVALID')
   if self.writer and not from_log:
-   self.writer.writerow([datetime.now().isoformat(timespec='milliseconds'),self.dist.get(),d.get('seq'),d.get('rssi'),d.get('len'),d.get('crc'),d.get('mode'),d.get('gap'),d.get('loss'),self.v['kbps'].get(),flags,est,rawax,raway,rawaz,rawgx,rawgy,rawgz,ax,ay,az,gx,gy,gz,roll,pitch,yaw,pressure,altitude,temp,humidity,battery,speed,speed_kmh,vertical,net_accel,ins,quality,self.mass.get(),self.qnh_pa,self.baro_ref.get()])
+   self.writer.writerow([datetime.now().isoformat(timespec='milliseconds'),d.get('tx_ms',''),self.dist.get(),d.get('seq'),d.get('rssi'),d.get('len'),d.get('crc'),d.get('mode'),d.get('gap'),d.get('loss'),self.v['kbps'].get(),flags,est,rawax,raway,rawaz,rawgx,rawgy,rawgz,ax,ay,az,gx,gy,gz,roll,pitch,yaw,pressure,altitude,temp,humidity,battery,'' if speed is None else speed,'' if speed_kmh is None else speed_kmh,vertical,net_accel,ins,quality,self.rx_queue_overflow,self.usb_drops,self.protocol_errors,self.mass.get(),self.qnh_pa,self.baro_ref.get()])
    self.record_stats['rx']+=1;self.record_stats['rssi_sum']+=int(d.get('rssi',-127));self.record_stats['rssi_min']=min(self.record_stats['rssi_min'],int(d.get('rssi',-127))) if self.record_stats['rx']>1 else int(d.get('rssi',-127));self.record_stats['max_gap']=max(self.record_stats['max_gap'],int(d.get('gap',0)))
  def render_imu(self):
   self.draw_imu();self.after(80 if self.vehicle_mesh else 40,self.render_imu)
@@ -346,9 +358,7 @@ class App(tk.Tk):
    def rotate(p):
     # Exactly the body-FRD -> world-NED matrix used by the ESP32, then NED
     # down is converted to the scene's up axis.  +X is the physical nose.
-    # The canvas view uses the opposite screen-handedness to the NED map.
-    # Keep telemetry signs intact; invert only this final visual projection.
-    x,y,z=p;scene_yaw=-yaw;cr,sr=math.cos(roll),math.sin(roll);cp,sp=math.cos(pitch),math.sin(pitch);cy,sy=math.cos(scene_yaw),math.sin(scene_yaw)
+    x,y,z=p;cr,sr=math.cos(roll),math.sin(roll);cp,sp=math.cos(pitch),math.sin(pitch);cy,sy=math.cos(yaw),math.sin(yaw)
     north=cp*cy*x+(sr*sp*cy-cr*sy)*y+(cr*sp*cy+sr*sy)*z
     east=cp*sy*x+(sr*sp*sy+cr*cy)*y+(cr*sp*sy-sr*cy)*z
     down=-sp*x+sr*cp*y+cr*cp*z
@@ -378,7 +388,7 @@ class App(tk.Tk):
  def draw(self):
   alt_low,alt_high=self.nice_axis(list(self.altitude_history),min_span=12)
   g_low,g_high=self.nice_axis(list(self.g_history),min_span=1,zero_floor=True)
-  speed_low,speed_high=self.nice_axis(list(self.speed_history),min_span=1,zero_floor=True)
+  speed_low,speed_high=self.nice_axis(list(self.speed_history),min_span=1,zero_floor=False)
   self.draw_chart(self.alt_canvas,'Высота ISA · 60 с',list(self.altitude_history),alt_low,alt_high,'#ed9e40','м')
   self.draw_chart(self.speed_canvas,'Вертикальная скорость · 60 с',list(self.speed_history),speed_low,speed_high,'#ed9e40','м/с')
   self.draw_chart(self.g_canvas,'Общая G-нагрузка · 60 с',list(self.g_history),g_low,g_high,'#f2c35d','G')

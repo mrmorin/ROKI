@@ -1,6 +1,7 @@
 Option Explicit
 
-Dim shell
+Dim shell, fso, here
 Set shell = CreateObject("WScript.Shell")
-shell.Environment("Process")("PYTHONPATH") = "C:\lr-project\.tools"
-shell.Run """C:\Users\mrand\AppData\Local\Programs\Python\Python312\pythonw.exe"" ""C:\lr-project\ROKI\monitor\roki_monitor.py""", 0, False
+Set fso = CreateObject("Scripting.FileSystemObject")
+here = fso.GetParentFolderName(WScript.ScriptFullName)
+shell.Run "pythonw.exe """" & here & "\roki_monitor.py"""", 0, False

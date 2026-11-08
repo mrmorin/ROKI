@@ -1,18 +1,19 @@
 #pragma once
 #include <stdint.h>
-constexpr uint32_t ROKI_MAGIC=0x524F4B49; constexpr uint8_t ROKI_VERSION=1;
+constexpr uint32_t ROKI_MAGIC=0x524F4B49; constexpr uint8_t ROKI_VERSION=2;
+constexpr uint16_t ROKI_SPEED_UNAVAILABLE=0xFFFF;
 enum RokiKind:uint8_t{TELEMETRY=1,COMMAND=2,FEEDBACK=3}; enum RokiMode:uint8_t{NORMAL=0,RESERVE=1,STRESS=2,AUTO_SWEEP=3,CALIBRATE=4,REBOOT_MOBILE=5};
 enum CalibrationCommand:uint16_t{CAL_START=1,CAL_CAPTURE=2,CAL_CANCEL=3};
 struct __attribute__((packed)) Header{uint32_t magic;uint8_t version,kind,mode,payloadLen;uint32_t seq,txMs;uint16_t crc,flags;};
-// SI values are scaled: acceleration = milli-m/s², angular rate = milli-rad/s,
+// SI values are scaled: acceleration = centi-m/s² (covers ±16 g), angular rate = milli-rad/s,
 // attitude = centidegrees.  The raw values remain in the sensor's native axes.
 struct __attribute__((packed)) Sensors{
-  int16_t ax,ay,az,gx,gy,gz;             // body FRD
+  int16_t ax,ay,az,gx,gy,gz;             // body FRD; acceleration is centi-m/s²
   int16_t rawAx,rawAy,rawAz,rawGx,rawGy,rawGz;
   int32_t pressurePa;int16_t tempCenti;uint16_t humidityCenti;
   // Yaw is wrapped to -180..+180 degrees before centidegree encoding.
   int16_t rollCenti,pitchCenti,yawCenti;uint16_t estimatorStatus;
-  // Inertial estimate: speed in centi-m/s, climb rate positive up.
+  // Inertial estimate: speed in centi-m/s or ROKI_SPEED_UNAVAILABLE, climb rate positive up.
   // km/h is derived on the ground; the saved two bytes carry battery voltage.
   uint16_t speedMpsCenti,batteryMilliVolts;int16_t verticalSpeedCenti;
   // inertialStatus bits 8..9: vertical-speed quality (0 INVALID, 1 DEGRADED,

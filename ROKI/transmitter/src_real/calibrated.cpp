@@ -17,6 +17,7 @@
 constexpr uint8_t CH=1,SDA_PIN=6,SCL_PIN=7,LED_PIN=10,BATTERY_ADC_PIN=A0;
 constexpr float G_MS2=9.80665f,G_MILLI_MS2=9806.65f;
 constexpr uint32_t IMU_PERIOD_US=4500,INS_ALIGN_US=7000000UL,ZUPT_US=650000UL;
+constexpr float ZUPT_BARO_RATE_MPS=.08f,ZUPT_BARO_SPAN_M=.12f;
 constexpr uint32_t CAL_MAGIC=0x52434135UL; // v5: calibration is bound to the detected IMU
 const uint8_t BCAST[]={255,255,255,255,255,255};
 struct ImuCalibration{uint32_t magic;float accBias[3],accScale[3],gyroBias[3];int16_t refTempCenti;uint8_t quality,imuType,imuWho;};
@@ -30,16 +31,19 @@ uint32_t seq=0,lastTx=0,lastImuUs=0,lastBmp=0,lastSht=0,lastBattery=0,sweepAt=0,
 uint32_t alignStableAt=0,stationaryAt=0,lastBaroUs=0;
 uint8_t calStep=0;float calAcc[6][3]{},calGyro[6][3]{},calTemp[6]{},sumAcc[3]{},sumGyro[3]{},sumTemp=0;uint16_t calSamples=0;
 uint8_t imuAddr=0,imuWhoAmI=0;ImuKind imuKind=IMU_NONE;BaroKind baroKind=BARO_NONE;HumidityKind humidityKind=HUM_NONE;float rollRad=0,pitchRad=0,yawRad=0;
+// Unit quaternion rotating body FRD vectors into world NED.
+float q0=1,q1=0,q2=0,q3=0;
 float startupGyroSum[3]{},startupGyroBias[3]{};
 // Vertical-only INS state.  Horizontal velocity is intentionally not exported:
 // without an external reference it is not a trustworthy measurement.
 float baroReferencePressure=0,filteredBaroHeight=0,previousRawBaroHeight=0,baroVerticalSpeed=0;
 float verticalHeight=0,verticalVelocity=0,verticalAccelBias=0,verticalAccelerationUp=0,previousVerticalAccelerationUp=0,worldAccelerationMagnitude=0;
+float stationaryBaroHeight=0,baroCandidateHeight=0;uint8_t baroCandidateCount=0;
 uint32_t lastGoodBaroUs=0;bool baroOutlier=false;uint8_t verticalQuality=0;uint16_t startupGyroSamples=0;
 void scan(){for(uint8_t address=8;address<120;address++){Wire.beginTransmission(address);if(Wire.endTransmission()==0)Serial.printf("I2C,addr=0x%02X\n",address);}}
 int16_t clamp16(float x){return (int16_t)constrain(x,-32768.f,32767.f);}
 uint16_t clampU16(float x){return (uint16_t)constrain(x,0.f,65535.f);}
-void resetInertial(){inertialReady=false;inertialStationary=false;baroReady=false;accelSaturated=false;velocityClamped=false;dtFault=false;attitudeDynamic=false;baroOutlier=false;verticalQuality=0;worldAccelerationMagnitude=baroReferencePressure=filteredBaroHeight=previousRawBaroHeight=baroVerticalSpeed=verticalHeight=verticalVelocity=verticalAccelBias=verticalAccelerationUp=previousVerticalAccelerationUp=0;alignStableAt=stationaryAt=lastBaroUs=lastGoodBaroUs=0;startupGyroSamples=0;for(uint8_t i=0;i<3;i++)startupGyroSum[i]=startupGyroBias[i]=0;sensor.speedMpsCenti=sensor.accelerationCenti=sensor.batteryMilliVolts=0;sensor.verticalSpeedCenti=0;sensor.inertialStatus=0;}
+void resetInertial(){inertialReady=false;inertialStationary=false;baroReady=false;accelSaturated=false;velocityClamped=false;dtFault=false;attitudeDynamic=false;baroOutlier=false;verticalQuality=0;q0=1;q1=q2=q3=0;worldAccelerationMagnitude=baroReferencePressure=filteredBaroHeight=previousRawBaroHeight=baroVerticalSpeed=verticalHeight=verticalVelocity=verticalAccelBias=verticalAccelerationUp=previousVerticalAccelerationUp=stationaryBaroHeight=baroCandidateHeight=0;baroCandidateCount=0;alignStableAt=stationaryAt=lastBaroUs=lastGoodBaroUs=0;startupGyroSamples=0;for(uint8_t i=0;i<3;i++)startupGyroSum[i]=startupGyroBias[i]=0;sensor.speedMpsCenti=ROKI_SPEED_UNAVAILABLE;sensor.accelerationCenti=sensor.batteryMilliVolts=0;sensor.verticalSpeedCenti=0;sensor.inertialStatus=0;}
 uint8_t readRegister(uint8_t address,uint8_t reg){Wire.beginTransmission(address);Wire.write(reg);if(Wire.endTransmission(false)!=0||Wire.requestFrom((int)address,1)!=1)return 0;return Wire.read();}
 bool writeRegister(uint8_t address,uint8_t reg,uint8_t value){Wire.beginTransmission(address);Wire.write(reg);Wire.write(value);return Wire.endTransmission()==0;}
 bool beginMpu6050(){
@@ -84,10 +88,13 @@ uint8_t finishCalibration(){
   float n=sqrtf(dot3(v[p],v[p]));rms+=(n-G_MILLI_MS2)*(n-G_MILLI_MS2);tempMean+=calTemp[p]/6.f;
   gyroMean+=sqrtf(dot3(calGyro[p],calGyro[p]))/6.f;if(!unit3(v[p]))return 0;
  }
- // Pose order: sensor top +Z/-Z, Type-C nose +Y/-Y, right edge +X/-X.
+ // Pose order is also an installation check, not merely a six-face fit.
+ // The declared mounting is sensor +X=body right, +Y=USB-C nose, +Z=up.
  float opposite[3]={dot3(v[0],v[1]),dot3(v[2],v[3]),dot3(v[4],v[5])};
  float orth=fabsf(dot3(v[2],v[4]))+fabsf(dot3(v[2],v[0]))+fabsf(dot3(v[4],v[0]));
  float handed[3];cross3(v[4],v[2],handed);float determinant=dot3(handed,v[0]);
+ const float expected[6][3]={{0,0,1},{0,0,-1},{0,1,0},{0,-1,0},{1,0,0},{-1,0,0}};
+ for(uint8_t p=0;p<6;p++)if(dot3(v[p],expected[p])<.82f)return 0;
  if(opposite[0]>-.75f||opposite[1]>-.75f||opposite[2]>-.75f||orth>.45f||determinant<.75f)return 0;
  rms=sqrtf(rms/6.f);float posePenalty=(3.f+opposite[0]+opposite[1]+opposite[2])*40.f+orth*35.f+(1.f-determinant)*45.f;
  next.refTempCenti=(int16_t)tempMean;next.imuType=(uint8_t)imuKind;next.imuWho=imuWhoAmI;next.quality=(uint8_t)constrain(100.f-rms/G_MILLI_MS2*400.f-gyroMean/1000.f*20.f-posePenalty,0.f,100.f);
@@ -95,17 +102,16 @@ uint8_t finishCalibration(){
  cal=next;calValid=true;attitudeReady=false;yawRad=0;resetInertial();prefs.putBytes("imuCal",&cal,sizeof(cal));return cal.quality;
 }
 void finishCapture(){if(calSamples<80){calCollecting=false;return;}for(uint8_t a=0;a<3;a++){calAcc[calStep][a]=sumAcc[a]/calSamples;calGyro[calStep][a]=sumGyro[a]/calSamples;}calTemp[calStep]=sumTemp/calSamples;calCollecting=false;calStep++;if(calStep>=6){uint8_t q=finishCalibration();calActive=false;calStep=0;if(!q){cal.quality=0;calValid=false;}}}
+void setQuaternionFromEuler(float roll,float pitch,float yaw){float cr=cosf(roll*.5f),sr=sinf(roll*.5f),cp=cosf(pitch*.5f),sp=sinf(pitch*.5f),cy=cosf(yaw*.5f),sy=sinf(yaw*.5f);q0=cr*cp*cy+sr*sp*sy;q1=sr*cp*cy-cr*sp*sy;q2=cr*sp*cy+sr*cp*sy;q3=cr*cp*sy-sr*sp*cy;}
+void updateEulerFromQuaternion(){rollRad=atan2f(2.f*(q0*q1+q2*q3),1.f-2.f*(q1*q1+q2*q2));pitchRad=asinf(constrain(2.f*(q0*q2-q3*q1),-1.f,1.f));yawRad=atan2f(2.f*(q0*q3+q1*q2),1.f-2.f*(q2*q2+q3*q3));if(yawRad<0)yawRad+=2*PI;}
 void updateAttitude(const float bodyA[3],const float bodyG[3],float dt){
- float accRoll=atan2f(-bodyA[1],-bodyA[2]);
- float accPitch=atan2f(bodyA[0],sqrtf(bodyA[1]*bodyA[1]+bodyA[2]*bodyA[2]));
- if(!attitudeReady){rollRad=accRoll;pitchRad=accPitch;yawRad=0;attitudeReady=true;return;}
- // 6-axis complementary attitude filter.  Accelerometer correction is used
- // only near 1 g, so a launch/impact cannot falsely rotate the gravity vector.
- rollRad+=bodyG[0]/1000.f*dt;pitchRad+=bodyG[1]/1000.f*dt;yawRad+=bodyG[2]/1000.f*dt;
- float magnitude=sqrtf(dot3(bodyA,bodyA));
- if(fabsf(magnitude-G_MILLI_MS2)<.16f*G_MILLI_MS2){float alpha=expf(-dt/.70f);rollRad=alpha*rollRad+(1.f-alpha)*accRoll;pitchRad=alpha*pitchRad+(1.f-alpha)*accPitch;}
- while(yawRad<0)yawRad+=2*PI;
- while(yawRad>=2*PI)yawRad-=2*PI;
+ float accRoll=atan2f(-bodyA[1],-bodyA[2]),accPitch=atan2f(bodyA[0],sqrtf(bodyA[1]*bodyA[1]+bodyA[2]*bodyA[2]));
+ if(!attitudeReady){setQuaternionFromEuler(accRoll,accPitch,0);updateEulerFromQuaternion();attitudeReady=true;return;}
+ float gx=bodyG[0]/1000.f,gy=bodyG[1]/1000.f,gz=bodyG[2]/1000.f,magnitude=sqrtf(dot3(bodyA,bodyA));
+ // Mahony-style gravity correction.  It is disabled away from 1 g, so strong
+ // linear acceleration does not masquerade as a tilt correction.
+ if(fabsf(magnitude-G_MILLI_MS2)<.16f*G_MILLI_MS2){float ax=-bodyA[0]/magnitude,ay=-bodyA[1]/magnitude,az=-bodyA[2]/magnitude;float ex=2.f*(q1*q3-q0*q2),ey=2.f*(q0*q1+q2*q3),ez=q0*q0-q1*q1-q2*q2+q3*q3;float erx=ey*az-ez*ay,ery=ez*ax-ex*az,erz=ex*ay-ey*ax;gx+=2.2f*erx;gy+=2.2f*ery;gz+=2.2f*erz;}
+ float h=.5f*dt,n0=q0+h*(-q1*gx-q2*gy-q3*gz),n1=q1+h*(q0*gx+q2*gz-q3*gy),n2=q2+h*(q0*gy-q1*gz+q3*gx),n3=q3+h*(q0*gz+q1*gy-q2*gx),norm=1.f/sqrtf(n0*n0+n1*n1+n2*n2+n3*n3);q0=n0*norm;q1=n1*norm;q2=n2*norm;q3=n3*norm;updateEulerFromQuaternion();
 }
 bool isStill(const float bodyA[3],const float bodyG[3]){return fabsf(sqrtf(dot3(bodyA,bodyA))-G_MILLI_MS2)<.12f*G_MILLI_MS2&&sqrtf(dot3(bodyG,bodyG))<80.f;}
 void bodyToNed(const float body[3],float ned[3]){
@@ -136,8 +142,11 @@ void updateInertial(const float bodyA[3],float bodyG[3],float dt,uint32_t nowUs)
  if(fabsf(verticalAccelerationUp)<.045f*G_MS2)verticalAccelerationUp=0;
  if(!dtFault&&!accelSaturated&&!attitudeDynamic){verticalHeight+=verticalVelocity*dt+.5f*(previousVerticalAccelerationUp+verticalAccelerationUp)*.5f*dt*dt;verticalVelocity+=(previousVerticalAccelerationUp+verticalAccelerationUp)*.5f*dt;previousVerticalAccelerationUp=verticalAccelerationUp;}
  else{previousVerticalAccelerationUp=0;if(attitudeDynamic)verticalVelocity=.75f*verticalVelocity+.25f*baroVerticalSpeed;}
- if(still){if(!stationaryAt)stationaryAt=nowUs;if(nowUs-stationaryAt>=ZUPT_US){verticalAccelBias=.98f*verticalAccelBias+.02f*(-worldAccel[2]);verticalVelocity=0;previousVerticalAccelerationUp=0;inertialStationary=true;}}
- else{stationaryAt=0;inertialStationary=false;}
+ // Accelerometer/gyro alone cannot distinguish uniform motion from rest.
+ // A ZUPT is therefore allowed only when barometric height is also stable.
+ bool baroStill=baroReady&&fabsf(baroVerticalSpeed)<ZUPT_BARO_RATE_MPS&&fabsf(filteredBaroHeight-stationaryBaroHeight)<ZUPT_BARO_SPAN_M;
+ if(still&&baroStill){if(!stationaryAt)stationaryAt=nowUs;if(nowUs-stationaryAt>=ZUPT_US){verticalAccelBias=.98f*verticalAccelBias+.02f*(-worldAccel[2]);verticalVelocity=0;previousVerticalAccelerationUp=0;inertialStationary=true;}}
+ else{stationaryAt=0;inertialStationary=false;if(baroReady)stationaryBaroHeight=filteredBaroHeight;}
  if(fabsf(verticalVelocity)>300.f){velocityClamped=true;verticalVelocity=0;}
 }
 void updateBarometer(uint32_t n){
@@ -145,13 +154,20 @@ void updateBarometer(uint32_t n){
  lastBmp=n;float pressure=0;if(baroKind==BARO_BMP280)pressure=bmp.readPressure();else if(baroKind==BARO_BME280)pressure=bme.readPressure();else if(baroKind==BARO_BMP3&&bmp3.performReading())pressure=bmp3.pressure;if(pressure<30000||pressure>110000)return;
  sensor.pressurePa=(int32_t)pressure;uint32_t nowUs=micros();if(!baroReferencePressure)baroReferencePressure=pressure;
  float rawHeight=44330.f*(1.f-powf(pressure/baroReferencePressure,.190294957f));
- if(!baroReady){filteredBaroHeight=previousRawBaroHeight=rawHeight;lastBaroUs=lastGoodBaroUs=nowUs;baroReady=true;return;}
+ if(!baroReady){filteredBaroHeight=previousRawBaroHeight=stationaryBaroHeight=rawHeight;lastBaroUs=lastGoodBaroUs=nowUs;baroReady=true;return;}
  float dt=(nowUs-lastBaroUs)/1000000.f;lastBaroUs=nowUs;if(dt<=0||dt>.5f)return;
  // Reject isolated pressure glitches before they can enter height or velocity.
  // 300 m/s is deliberately above the intended operating envelope.  It keeps
  // genuine fast motion while rejecting a one-read pressure discontinuity.
- baroOutlier=fabsf(rawHeight-previousRawBaroHeight)>max(12.f,300.f*dt)||(inertialReady&&fabsf(rawHeight-verticalHeight)>80.f);
- if(baroOutlier)return;
+ bool discontinuity=fabsf(rawHeight-previousRawBaroHeight)>max(12.f,300.f*dt);bool disagreement=inertialReady&&fabsf(rawHeight-verticalHeight)>80.f;
+ baroOutlier=discontinuity||disagreement;
+ if(baroOutlier){
+  // A single jump is rejected.  Several mutually consistent readings are a
+  // legitimate barometric relock after prolonged IMU drift, not permanent bad data.
+  if(!baroCandidateCount||fabsf(rawHeight-baroCandidateHeight)>2.f){baroCandidateHeight=rawHeight;baroCandidateCount=1;}else baroCandidateCount++;
+  if(baroCandidateCount<4)return;
+  filteredBaroHeight=previousRawBaroHeight=baroCandidateHeight;verticalHeight=baroCandidateHeight;verticalVelocity=baroVerticalSpeed=0;verticalAccelBias=0;baroCandidateCount=0;baroOutlier=false;
+ }else baroCandidateCount=0;
  previousRawBaroHeight=rawHeight;float before=filteredBaroHeight;filteredBaroHeight=.82f*filteredBaroHeight+.18f*rawHeight;
  float measuredVz=(filteredBaroHeight-before)/dt;baroVerticalSpeed=.88f*baroVerticalSpeed+.12f*measuredVz;lastGoodBaroUs=nowUs;
  if(inertialReady){float innovation=filteredBaroHeight-verticalHeight;verticalHeight+=.16f*innovation;verticalVelocity+=.08f*(baroVerticalSpeed-verticalVelocity);verticalAccelBias-=.0008f*innovation;verticalAccelBias=constrain(verticalAccelBias,-1.5f,1.5f);}
@@ -174,20 +190,20 @@ void publishInertial(uint32_t n){
  if(n-lastInertialPublish<50)return;
  lastInertialPublish=n;
  // Do not present a drifting 3D IMU integral as a measured air/ground speed.
- sensor.speedMpsCenti=0;sensor.verticalSpeedCenti=clamp16(verticalVelocity*100.f);sensor.accelerationCenti=clampU16(worldAccelerationMagnitude*100.f);sensor.inertialStatus=inertialFlags();
+ sensor.speedMpsCenti=ROKI_SPEED_UNAVAILABLE;sensor.verticalSpeedCenti=clamp16(verticalVelocity*100.f);sensor.accelerationCenti=clampU16(worldAccelerationMagnitude*100.f);sensor.inertialStatus=inertialFlags();
 }
 void sample(uint32_t n){
  if(imuOK){uint32_t nowUs=micros();if(!lastImuUs||nowUs-lastImuUs>=IMU_PERIOD_US){float dt=lastImuUs?(nowUs-lastImuUs)/1000000.f:IMU_PERIOD_US/1000000.f;lastImuUs=nowUs;float rawA[3]{},rawG[3]{},imuTemp=0;if(!readImu(rawA,rawG,imuTemp))return;
-  sensor.rawAx=clamp16(rawA[0]);sensor.rawAy=clamp16(rawA[1]);sensor.rawAz=clamp16(rawA[2]);sensor.rawGx=clamp16(rawG[0]);sensor.rawGy=clamp16(rawG[1]);sensor.rawGz=clamp16(rawG[2]);
+  sensor.rawAx=clamp16(rawA[0]/10.f);sensor.rawAy=clamp16(rawA[1]/10.f);sensor.rawAz=clamp16(rawA[2]/10.f);sensor.rawGx=clamp16(rawG[0]);sensor.rawGy=clamp16(rawG[1]);sensor.rawGz=clamp16(rawG[2]);
   if(calCollecting){for(uint8_t i=0;i<3;i++){sumAcc[i]+=rawA[i];sumGyro[i]+=rawG[i];}sumTemp+=imuTemp*100.f;calSamples++;if(n-calAt>=1000)finishCapture();}
   float correctedA[3],correctedG[3];for(uint8_t i=0;i<3;i++){correctedA[i]=(rawA[i]-cal.accBias[i])*cal.accScale[i];correctedG[i]=rawG[i]-cal.gyroBias[i];}
   // The only sensor-to-body mapping: sensor X=right, Y=forward, Z=up -> body FRD.
   float bodyA[3]={correctedA[1],correctedA[0],-correctedA[2]},bodyG[3]={correctedG[1],correctedG[0],-correctedG[2]};updateInertial(bodyA,bodyG,dt,nowUs);
-  sensor.ax=clamp16(bodyA[0]);sensor.ay=clamp16(bodyA[1]);sensor.az=clamp16(bodyA[2]);sensor.gx=clamp16(bodyG[0]);sensor.gy=clamp16(bodyG[1]);sensor.gz=clamp16(bodyG[2]);sensor.rollCenti=clamp16(degrees(rollRad)*100.f);sensor.pitchCenti=clamp16(degrees(pitchRad)*100.f);float yawDeg=degrees(yawRad);if(yawDeg>180.f)yawDeg-=360.f;sensor.yawCenti=clamp16(yawDeg*100.f);
+  sensor.ax=clamp16(bodyA[0]/10.f);sensor.ay=clamp16(bodyA[1]/10.f);sensor.az=clamp16(bodyA[2]/10.f);sensor.gx=clamp16(bodyG[0]);sensor.gy=clamp16(bodyG[1]);sensor.gz=clamp16(bodyG[2]);sensor.rollCenti=clamp16(degrees(rollRad)*100.f);sensor.pitchCenti=clamp16(degrees(pitchRad)*100.f);float yawDeg=degrees(yawRad);if(yawDeg>180.f)yawDeg-=360.f;sensor.yawCenti=clamp16(yawDeg*100.f);
  }}
  updateBarometer(n);updateBattery(n);publishInertial(n);if(shtOK&&n-lastSht>=500){lastSht=n;if(humidityKind==HUM_SHT4){sensors_event_t h,t;sht.getEvent(&h,&t);sensor.tempCenti=clamp16(t.temperature*100);sensor.humidityCenti=(uint16_t)constrain(h.relative_humidity*100,0.f,10000.f);}else if(humidityKind==HUM_SHT31){sensor.tempCenti=clamp16(sht31.readTemperature()*100);sensor.humidityCenti=(uint16_t)constrain(sht31.readHumidity()*100,0.f,10000.f);}else if(humidityKind==HUM_BME280){sensor.tempCenti=clamp16(bme.readTemperature()*100);sensor.humidityCenti=(uint16_t)constrain(bme.readHumidity()*100,0.f,10000.f);}}
 }
-void recv(const esp_now_recv_info_t*,const uint8_t*d,int n){if(n<20)return;const Header*h=(const Header*)d;if(h->magic!=ROKI_MAGIC)return;if(h->kind==FEEDBACK){lastFeedback=millis();return;}if(h->kind!=COMMAND)return;if(h->mode==REBOOT_MOBILE){rebootPending=true;rebootAt=millis()+120;return;}if(h->mode==CALIBRATE){Serial.printf("CMD,cal=%u\n",(unsigned)h->flags);if(h->flags==CAL_START)startCalibration();else if(h->flags==CAL_CAPTURE)beginCapture(millis());else if(h->flags==CAL_CANCEL)cancelCalibration();return;}if(h->mode<=STRESS)mode=(RokiMode)h->mode;else if(h->mode==AUTO_SWEEP){mode=NORMAL;sweepAt=millis();sweepSeconds=h->flags?h->flags:30;}}
+void recv(const esp_now_recv_info_t*,const uint8_t*d,int n){if(n<(int)sizeof(Header))return;const Header*h=(const Header*)d;if(h->magic!=ROKI_MAGIC||h->version!=ROKI_VERSION)return;if(h->kind==FEEDBACK){lastFeedback=millis();return;}if(h->kind!=COMMAND)return;if(h->mode==REBOOT_MOBILE){rebootPending=true;rebootAt=millis()+120;return;}if(h->mode==CALIBRATE){Serial.printf("CMD,cal=%u\n",(unsigned)h->flags);if(h->flags==CAL_START)startCalibration();else if(h->flags==CAL_CAPTURE)beginCapture(millis());else if(h->flags==CAL_CANCEL)cancelCalibration();return;}if(h->mode<=STRESS)mode=(RokiMode)h->mode;else if(h->mode==AUTO_SWEEP){mode=NORMAL;sweepAt=millis();sweepSeconds=h->flags?h->flags:30;}}
 void statusLed(uint32_t n){digitalWrite(LED_PIN,n-lastFeedback<2500?HIGH:((n/250)%2));}
 uint16_t telemetryFlags(){uint16_t f=(imuOK?1:0)|(bmpOK?2:0)|(shtOK?4:0);if(calActive)f|=1<<3;f|=(uint16_t)(calStep&7)<<4;if(calCollecting)f|=1<<7;f|=(uint16_t)cal.quality<<8;return f;}
 uint16_t estimatorFlags(){uint16_t f=0;if(imuOK)f|=1;if(attitudeReady)f|=2;if(calValid)f|=4;if(calActive)f|=8;return f;}
