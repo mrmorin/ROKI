@@ -18,6 +18,9 @@ constexpr uint8_t CH=1,SDA_PIN=6,SCL_PIN=7,LED_PIN=10,BATTERY_ADC_PIN=A0;
 constexpr float G_MS2=9.80665f,G_MILLI_MS2=9806.65f;
 constexpr uint32_t IMU_PERIOD_US=4500,INS_ALIGN_US=7000000UL,ZUPT_US=650000UL;
 constexpr float ZUPT_BARO_RATE_MPS=.08f,ZUPT_BARO_SPAN_M=.12f;
+// Relock candidates can be moving fast.  Consistency is checked against each
+// barometer interval; 250 m/s intentionally covers the 150 m/s test envelope.
+constexpr float BARO_RELOCK_MAX_RATE_MPS=250.f,BARO_RELOCK_NOISE_M=.5f;
 constexpr uint32_t CAL_MAGIC=0x52434135UL; // v5: calibration is bound to the detected IMU
 const uint8_t BCAST[]={255,255,255,255,255,255};
 struct ImuCalibration{uint32_t magic;float accBias[3],accScale[3],gyroBias[3];int16_t refTempCenti;uint8_t quality,imuType,imuWho;};
@@ -164,7 +167,8 @@ void updateBarometer(uint32_t n){
  if(baroOutlier){
   // A single jump is rejected.  Several mutually consistent readings are a
   // legitimate barometric relock after prolonged IMU drift, not permanent bad data.
-  if(!baroCandidateCount||fabsf(rawHeight-baroCandidateHeight)>2.f){baroCandidateHeight=baroCandidatePreviousHeight=rawHeight;baroCandidateVerticalSpeed=baroVerticalSpeed;baroCandidateCount=1;}else{baroCandidateVerticalSpeed=.7f*baroCandidateVerticalSpeed+.3f*((rawHeight-baroCandidatePreviousHeight)/dt);baroCandidatePreviousHeight=baroCandidateHeight=rawHeight;baroCandidateCount++;}
+  float candidateStep=fabsf(rawHeight-baroCandidateHeight),allowedStep=BARO_RELOCK_NOISE_M+BARO_RELOCK_MAX_RATE_MPS*dt;
+  if(!baroCandidateCount||candidateStep>allowedStep){baroCandidateHeight=baroCandidatePreviousHeight=rawHeight;baroCandidateVerticalSpeed=baroVerticalSpeed;baroCandidateCount=1;}else{baroCandidateVerticalSpeed=.7f*baroCandidateVerticalSpeed+.3f*((rawHeight-baroCandidatePreviousHeight)/dt);baroCandidatePreviousHeight=baroCandidateHeight=rawHeight;baroCandidateCount++;}
   if(baroCandidateCount<4)return;
   filteredBaroHeight=previousRawBaroHeight=baroCandidateHeight;verticalHeight=baroCandidateHeight;baroVerticalSpeed=baroCandidateVerticalSpeed;verticalVelocity=.6f*verticalVelocity+.4f*baroCandidateVerticalSpeed;verticalAccelBias=0;baroCandidateCount=0;baroOutlier=false;
  }else baroCandidateCount=0;

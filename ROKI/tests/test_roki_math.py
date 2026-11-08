@@ -38,7 +38,8 @@ class BaroGate:
     def feed(self, raw, predicted, dt=.05):
         bad=abs(raw-self.prev)>max(12.,300*dt) or abs(raw-predicted)>80
         if bad:
-            if not self.count or abs(raw-self.candidate)>2: self.candidate,self.candidate_prev,self.candidate_vz,self.count=raw,raw,self.vertical,1
+            allowed_step=.5+250*dt
+            if not self.count or abs(raw-self.candidate)>allowed_step: self.candidate,self.candidate_prev,self.candidate_vz,self.count=raw,raw,self.vertical,1
             else:
                 self.candidate_vz=.7*self.candidate_vz+.3*(raw-self.candidate_prev)/dt
                 self.candidate_prev=self.candidate=raw; self.count+=1
@@ -103,6 +104,18 @@ class RokiMathTests(unittest.TestCase):
         self.assertAlmostEqual(b.height,101.3)
         # Relock must retain an actual climb, not turn it into a fake stop.
         self.assertGreater(b.vertical,.5)
+
+    def test_baro_relock_high_speed_climb_and_descent(self):
+        # Four 20 Hz samples must relock through the requested speed envelope.
+        for rate in (20.,60.,100.,150.,-20.,-60.,-100.,-150.):
+            with self.subTest(rate=rate):
+                b=BaroGate(); b.feed(0,0); b.vertical=rate
+                samples=[101.+rate*.05*i for i in range(4)]
+                accepted=[b.feed(height,0,dt=.05) for height in samples]
+                self.assertEqual(accepted,[False,False,False,True])
+                self.assertAlmostEqual(b.height,samples[-1])
+                self.assertGreater(b.vertical*rate,0)
+                self.assertGreater(abs(b.vertical),.25*abs(rate))
 
     def test_acceleration_16g_fits_protocol(self):
         self.assertLessEqual(round(16*G*100),32767)
