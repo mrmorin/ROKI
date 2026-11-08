@@ -9,6 +9,6 @@ ESP-NOW LR telemetry link for two Seeed Studio XIAO ESP32-C3 boards.
 - `monitor/` — Windows ground-station application, telemetry logging, playback, calibration UI and 3D orientation/trajectory view.
 - `common/` — radio protocol shared by both ESP32 firmwares.
 
-Build the transmitter or receiver with PlatformIO from its respective directory. Run `monitor/launch_roki_monitor.vbs` to start the Windows monitor.
+Build the transmitter or receiver with PlatformIO from its respective directory. Install the monitor dependency once with `py -m pip install -r monitor/requirements.txt`, then run `monitor/launch_roki_monitor.vbs`. The launcher resolves its own directory and has no machine-specific paths.
 
 Field logs and per-PC monitor settings are deliberately not committed.
