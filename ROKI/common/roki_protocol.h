@@ -2,7 +2,7 @@
 #include <stdint.h>
 constexpr uint32_t ROKI_MAGIC=0x524F4B49; constexpr uint8_t ROKI_VERSION=2;
 constexpr uint16_t ROKI_SPEED_UNAVAILABLE=0xFFFF;
-enum RokiKind:uint8_t{TELEMETRY=1,COMMAND=2,FEEDBACK=3}; enum RokiMode:uint8_t{NORMAL=0,RESERVE=1,STRESS=2,AUTO_SWEEP=3,CALIBRATE=4,REBOOT_MOBILE=5};
+enum RokiKind:uint8_t{TELEMETRY=1,COMMAND=2,FEEDBACK=3}; enum RokiMode:uint8_t{NORMAL=0,RESERVE=1,STRESS=2,AUTO_SWEEP=3,CALIBRATE=4,REBOOT_MOBILE=5,SET_TX_POWER=6};
 enum CalibrationCommand:uint16_t{CAL_START=1,CAL_CAPTURE=2,CAL_CANCEL=3};
 struct __attribute__((packed)) Header{uint32_t magic;uint8_t version,kind,mode,payloadLen;uint32_t seq,txMs;uint16_t crc,flags;};
 // SI values are scaled: acceleration = centi-m/s² (covers ±16 g), angular rate = milli-rad/s,
