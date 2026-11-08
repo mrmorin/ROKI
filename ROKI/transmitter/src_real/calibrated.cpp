@@ -38,12 +38,12 @@ float startupGyroSum[3]{},startupGyroBias[3]{};
 // without an external reference it is not a trustworthy measurement.
 float baroReferencePressure=0,filteredBaroHeight=0,previousRawBaroHeight=0,baroVerticalSpeed=0;
 float verticalHeight=0,verticalVelocity=0,verticalAccelBias=0,verticalAccelerationUp=0,previousVerticalAccelerationUp=0,worldAccelerationMagnitude=0;
-float stationaryBaroHeight=0,baroCandidateHeight=0;uint8_t baroCandidateCount=0;
+float stationaryBaroHeight=0,baroCandidateHeight=0,baroCandidatePreviousHeight=0,baroCandidateVerticalSpeed=0;uint8_t baroCandidateCount=0;
 uint32_t lastGoodBaroUs=0;bool baroOutlier=false;uint8_t verticalQuality=0;uint16_t startupGyroSamples=0;
 void scan(){for(uint8_t address=8;address<120;address++){Wire.beginTransmission(address);if(Wire.endTransmission()==0)Serial.printf("I2C,addr=0x%02X\n",address);}}
 int16_t clamp16(float x){return (int16_t)constrain(x,-32768.f,32767.f);}
 uint16_t clampU16(float x){return (uint16_t)constrain(x,0.f,65535.f);}
-void resetInertial(){inertialReady=false;inertialStationary=false;baroReady=false;accelSaturated=false;velocityClamped=false;dtFault=false;attitudeDynamic=false;baroOutlier=false;verticalQuality=0;q0=1;q1=q2=q3=0;worldAccelerationMagnitude=baroReferencePressure=filteredBaroHeight=previousRawBaroHeight=baroVerticalSpeed=verticalHeight=verticalVelocity=verticalAccelBias=verticalAccelerationUp=previousVerticalAccelerationUp=stationaryBaroHeight=baroCandidateHeight=0;baroCandidateCount=0;alignStableAt=stationaryAt=lastBaroUs=lastGoodBaroUs=0;startupGyroSamples=0;for(uint8_t i=0;i<3;i++)startupGyroSum[i]=startupGyroBias[i]=0;sensor.speedMpsCenti=ROKI_SPEED_UNAVAILABLE;sensor.accelerationCenti=sensor.batteryMilliVolts=0;sensor.verticalSpeedCenti=0;sensor.inertialStatus=0;}
+void resetInertial(){inertialReady=false;inertialStationary=false;baroReady=false;accelSaturated=false;velocityClamped=false;dtFault=false;attitudeDynamic=false;baroOutlier=false;verticalQuality=0;q0=1;q1=q2=q3=0;worldAccelerationMagnitude=baroReferencePressure=filteredBaroHeight=previousRawBaroHeight=baroVerticalSpeed=verticalHeight=verticalVelocity=verticalAccelBias=verticalAccelerationUp=previousVerticalAccelerationUp=stationaryBaroHeight=baroCandidateHeight=baroCandidatePreviousHeight=baroCandidateVerticalSpeed=0;baroCandidateCount=0;alignStableAt=stationaryAt=lastBaroUs=lastGoodBaroUs=0;startupGyroSamples=0;for(uint8_t i=0;i<3;i++)startupGyroSum[i]=startupGyroBias[i]=0;sensor.speedMpsCenti=ROKI_SPEED_UNAVAILABLE;sensor.accelerationCenti=sensor.batteryMilliVolts=0;sensor.verticalSpeedCenti=0;sensor.inertialStatus=0;}
 uint8_t readRegister(uint8_t address,uint8_t reg){Wire.beginTransmission(address);Wire.write(reg);if(Wire.endTransmission(false)!=0||Wire.requestFrom((int)address,1)!=1)return 0;return Wire.read();}
 bool writeRegister(uint8_t address,uint8_t reg,uint8_t value){Wire.beginTransmission(address);Wire.write(reg);Wire.write(value);return Wire.endTransmission()==0;}
 bool beginMpu6050(){
@@ -110,7 +110,7 @@ void updateAttitude(const float bodyA[3],const float bodyG[3],float dt){
  float gx=bodyG[0]/1000.f,gy=bodyG[1]/1000.f,gz=bodyG[2]/1000.f,magnitude=sqrtf(dot3(bodyA,bodyA));
  // Mahony-style gravity correction.  It is disabled away from 1 g, so strong
  // linear acceleration does not masquerade as a tilt correction.
- if(fabsf(magnitude-G_MILLI_MS2)<.16f*G_MILLI_MS2){float ax=-bodyA[0]/magnitude,ay=-bodyA[1]/magnitude,az=-bodyA[2]/magnitude;float ex=2.f*(q1*q3-q0*q2),ey=2.f*(q0*q1+q2*q3),ez=q0*q0-q1*q1-q2*q2+q3*q3;float erx=ey*az-ez*ay,ery=ez*ax-ex*az,erz=ex*ay-ey*ax;gx+=2.2f*erx;gy+=2.2f*ery;gz+=2.2f*erz;}
+ if(fabsf(magnitude-G_MILLI_MS2)<.16f*G_MILLI_MS2){float ax=-bodyA[0]/magnitude,ay=-bodyA[1]/magnitude,az=-bodyA[2]/magnitude;float ex=2.f*(q1*q3-q0*q2),ey=2.f*(q0*q1+q2*q3),ez=q0*q0-q1*q1-q2*q2+q3*q3;float erx=ez*ay-ey*az,ery=ex*az-ez*ax,erz=ey*ax-ex*ay;gx+=2.2f*erx;gy+=2.2f*ery;gz+=2.2f*erz;}
  float h=.5f*dt,n0=q0+h*(-q1*gx-q2*gy-q3*gz),n1=q1+h*(q0*gx+q2*gz-q3*gy),n2=q2+h*(q0*gy-q1*gz+q3*gx),n3=q3+h*(q0*gz+q1*gy-q2*gx),norm=1.f/sqrtf(n0*n0+n1*n1+n2*n2+n3*n3);q0=n0*norm;q1=n1*norm;q2=n2*norm;q3=n3*norm;updateEulerFromQuaternion();
 }
 bool isStill(const float bodyA[3],const float bodyG[3]){return fabsf(sqrtf(dot3(bodyA,bodyA))-G_MILLI_MS2)<.12f*G_MILLI_MS2&&sqrtf(dot3(bodyG,bodyG))<80.f;}
@@ -164,9 +164,9 @@ void updateBarometer(uint32_t n){
  if(baroOutlier){
   // A single jump is rejected.  Several mutually consistent readings are a
   // legitimate barometric relock after prolonged IMU drift, not permanent bad data.
-  if(!baroCandidateCount||fabsf(rawHeight-baroCandidateHeight)>2.f){baroCandidateHeight=rawHeight;baroCandidateCount=1;}else baroCandidateCount++;
+  if(!baroCandidateCount||fabsf(rawHeight-baroCandidateHeight)>2.f){baroCandidateHeight=baroCandidatePreviousHeight=rawHeight;baroCandidateVerticalSpeed=baroVerticalSpeed;baroCandidateCount=1;}else{baroCandidateVerticalSpeed=.7f*baroCandidateVerticalSpeed+.3f*((rawHeight-baroCandidatePreviousHeight)/dt);baroCandidatePreviousHeight=baroCandidateHeight=rawHeight;baroCandidateCount++;}
   if(baroCandidateCount<4)return;
-  filteredBaroHeight=previousRawBaroHeight=baroCandidateHeight;verticalHeight=baroCandidateHeight;verticalVelocity=baroVerticalSpeed=0;verticalAccelBias=0;baroCandidateCount=0;baroOutlier=false;
+  filteredBaroHeight=previousRawBaroHeight=baroCandidateHeight;verticalHeight=baroCandidateHeight;baroVerticalSpeed=baroCandidateVerticalSpeed;verticalVelocity=.6f*verticalVelocity+.4f*baroCandidateVerticalSpeed;verticalAccelBias=0;baroCandidateCount=0;baroOutlier=false;
  }else baroCandidateCount=0;
  previousRawBaroHeight=rawHeight;float before=filteredBaroHeight;filteredBaroHeight=.82f*filteredBaroHeight+.18f*rawHeight;
  float measuredVz=(filteredBaroHeight-before)/dt;baroVerticalSpeed=.88f*baroVerticalSpeed+.12f*measuredVz;lastGoodBaroUs=nowUs;
